@@ -4,6 +4,13 @@
 
 Provide a secure, stateless-capable entry point between clients and the internal cluster.
 
+## MVP architecture baseline
+
+- Gateway owns identity, short-lived tokens and the MySQL-backed character-persistence boundary. Coordinator owns placement and reservations; game instances own live simulation.
+- Gateway initiates idempotent transfers using `Requested -> Reserved -> Prepared -> SourceFrozen -> TargetAccepted -> Committed -> SourceReleased`. The source stays authoritative until the lease changes atomically at `Committed`.
+- Character writes require a monotonic MySQL `lease_version` fencing token; Redis is only transient session, chat and presence distribution.
+- Gateway uses versioned `Protocol` contracts and capabilities. It never delegates password handling or authoritative placement to a game instance.
+
 ## Rules
 
 - Never log passwords, access tokens, refresh tokens or transfer-ticket secrets.
