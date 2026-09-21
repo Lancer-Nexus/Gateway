@@ -27,3 +27,14 @@ git submodule update --init --remote --merge Protocol
 ```
 
 CI performs the same update before restoring and building the Gateway, so a build uses the current `Protocol/main` commit.
+
+## Development
+
+```bash
+git submodule update --init --remote --merge Protocol
+dotnet restore tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj
+dotnet build tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj --configuration Release --no-restore --warnaserror
+dotnet test tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj --configuration Release --no-build
+```
+
+The initial service exposes only liveness, readiness and protocol-capability endpoints. Authentication, Coordinator placement and persistence are added behind these boundaries in subsequent changes.

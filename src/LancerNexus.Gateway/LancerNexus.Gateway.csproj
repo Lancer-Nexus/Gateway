@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>LancerNexus.Gateway</RootNamespace>
+    <AssemblyName>LancerNexus.Gateway</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Protocol/src/LancerNexus.Protocol/LancerNexus.Protocol.csproj" />
+  </ItemGroup>
+</Project>
