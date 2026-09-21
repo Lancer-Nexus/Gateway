@@ -17,3 +17,13 @@ The Gateway must not run authoritative world simulation. Persistent account and 
 ## Runtime
 
 The service targets Linux and the current .NET runtime. Internal service communication uses the shared contracts from `Protocol` and private authenticated channels.
+
+## Shared Protocol
+
+The shared contracts are checked out in the `Protocol` submodule. Update it before every local build with:
+
+```bash
+git submodule update --init --remote --merge Protocol
+```
+
+CI performs the same update before restoring and building the Gateway, so a build uses the current `Protocol/main` commit.
