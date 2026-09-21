@@ -22,6 +22,11 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Keep public HTTP endpoints separate from internal QUIC/service endpoints.
 - Rate-limit login and transfer operations.
 
+## Working-model escalation
+
+- If a task requires complex reasoning beyond the current model's reliable scope, ask the user whether switching to a stronger model is desired before continuing.
+- Do not switch models silently or broaden the task because a stronger model may be useful.
+
 ## Verification
 
 Test invalid credentials, expired tokens, replayed tickets, Coordinator failure, duplicate requests, reconnects and full target instances.
