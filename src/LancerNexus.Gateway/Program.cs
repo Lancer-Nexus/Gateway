@@ -23,10 +23,10 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
     capabilities = new[] { "health_v1", "protocol_v1", "coordinator_placement_v1" }
 }));
 
-app.MapPost("/api/v1/placement", async (
+async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,
     LancerNexus.Gateway.CoordinatorPlacementClient coordinator,
-    CancellationToken cancellationToken) =>
+    CancellationToken cancellationToken)
 {
     if (request.RequestId == Guid.Empty || request.SessionId == Guid.Empty ||
         string.IsNullOrWhiteSpace(request.TargetSystem) ||
@@ -41,7 +41,10 @@ app.MapPost("/api/v1/placement", async (
     return result.Envelope.Decision.Accepted
         ? Results.Ok(result.Envelope)
         : Results.Conflict(result.Envelope);
-});
+}
+
+app.MapPost("/api/v1/placement/request", HandlePlacement);
+app.MapPost("/api/v1/placement", HandlePlacement);
 
 app.Run();
 
