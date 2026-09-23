@@ -1,8 +1,33 @@
 using LancerNexus.Gateway;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHealthChecks();
+var loginRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:LoginRateLimitPerMinute", 10);
+var placementRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:PlacementRateLimitPerMinute", 30);
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = loginRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("placement", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = placementRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(coordinatorOptions);
 var sessionTokenOptions = SessionTokenOptions.FromConfiguration(builder.Configuration);
@@ -19,6 +44,7 @@ builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 
 var app = builder.Build();
+app.UseRateLimiter();
 
 app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
@@ -46,7 +72,7 @@ app.MapPost("/api/v1/auth/login", async (
         LoginFailure.InvalidCredentials => Results.Unauthorized(),
         _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
     };
-});
+}).RequireRateLimiting("login");
 
 app.MapPost("/api/v1/auth/refresh", async (
     RefreshRequest request,
@@ -153,9 +179,17 @@ async Task<IResult> HandlePlacement(
         : Results.Conflict(result.Envelope);
 }
 
-app.MapPost("/api/v1/placement/request", HandlePlacement);
-app.MapPost("/api/v1/placement", HandlePlacement);
+app.MapPost("/api/v1/placement/request", HandlePlacement).RequireRateLimiting("placement");
+app.MapPost("/api/v1/placement", HandlePlacement).RequireRateLimiting("placement");
 
 app.Run();
+
+static int ReadPositiveLimit(IConfiguration configuration, string key, int defaultValue)
+{
+    var value = configuration.GetValue<int?>(key) ?? defaultValue;
+    if (value <= 0)
+        throw new InvalidOperationException($"Configuration value '{key}' must be positive.");
+    return value;
+}
 
 public partial class Program;
