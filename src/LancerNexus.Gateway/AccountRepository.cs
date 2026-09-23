@@ -141,6 +141,7 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
             _ => throw new InvalidDataException("Gateway account_id has an unsupported database type.")
         };
         var session = new SessionRecord(accountId, reader.GetDateTime(1));
+        await reader.DisposeAsync();
         await transaction.CommitAsync(cancellationToken);
         return session;
     }
