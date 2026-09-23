@@ -3,7 +3,6 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddHealthChecks();
 var loginRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:LoginRateLimitPerMinute", 10);
 var placementRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:PlacementRateLimitPerMinute", 30);
 builder.Services.AddRateLimiter(options =>
@@ -34,6 +33,9 @@ var sessionTokenOptions = SessionTokenOptions.FromConfiguration(builder.Configur
 builder.Services.AddSingleton(sessionTokenOptions);
 builder.Services.AddSingleton<SessionTokenCodec>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
+builder.Services.AddHealthChecks()
+    .AddCheck<GatewayReadinessHealthCheck>("gateway_dependencies");
 builder.Services.AddSingleton<IPasswordVerifier, BcryptPasswordVerifier>();
 var gatewayConnectionString = builder.Configuration.GetConnectionString("Gateway");
 builder.Services.AddSingleton<IAccountRepository>(_ =>
