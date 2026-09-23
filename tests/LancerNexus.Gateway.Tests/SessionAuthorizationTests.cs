@@ -51,6 +51,21 @@ public sealed class SessionAuthorizationTests
         Assert.Equal("token_signing_not_configured", result.ReasonCode);
     }
 
+    [Fact]
+    public void AuthorizeToken_ReturnsOnlyValidatedClaims()
+    {
+        var now = DateTime.UtcNow;
+        var codec = Codec();
+        var claims = Claims(now, Guid.NewGuid());
+
+        var result = SessionAuthorization.AuthorizeToken(
+            $"Bearer {codec.Issue(claims)}", codec, now.AddSeconds(1));
+
+        Assert.True(result.Accepted);
+        Assert.Equal(claims.AccountId, result.Claims!.AccountId);
+        Assert.Equal("game-server", result.Claims.Audience);
+    }
+
     private static PlacementRequest Request() => new()
     {
         RequestId = Guid.NewGuid(),

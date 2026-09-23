@@ -11,9 +11,8 @@ public sealed record SessionAuthorizationResult(
 
 public static class SessionAuthorization
 {
-    public static SessionAuthorizationResult Authorize(
+    public static SessionAuthorizationResult AuthorizeToken(
         string? authorizationHeader,
-        PlacementRequest request,
         SessionTokenCodec codec,
         DateTime nowUtc)
     {
@@ -25,11 +24,23 @@ public static class SessionAuthorization
         var validation = codec.Validate(authorization.Parameter, nowUtc);
         if (validation.ReasonCode == "token_signing_not_configured")
             return new SessionAuthorizationResult(false, true, null, validation.ReasonCode);
-        if (!validation.Accepted)
-            return new SessionAuthorizationResult(false, false, null, validation.ReasonCode);
-        if (validation.Claims!.SessionId != request.SessionId)
+        return validation.Accepted
+            ? new SessionAuthorizationResult(true, false, validation.Claims, "accepted")
+            : new SessionAuthorizationResult(false, false, null, validation.ReasonCode);
+    }
+
+    public static SessionAuthorizationResult Authorize(
+        string? authorizationHeader,
+        PlacementRequest request,
+        SessionTokenCodec codec,
+        DateTime nowUtc)
+    {
+        var authorization = AuthorizeToken(authorizationHeader, codec, nowUtc);
+        if (!authorization.Accepted)
+            return authorization;
+        if (authorization.Claims!.SessionId != request.SessionId)
             return new SessionAuthorizationResult(false, false, null, "session_id_mismatch");
 
-        return new SessionAuthorizationResult(true, false, validation.Claims, "accepted");
+        return authorization;
     }
 }

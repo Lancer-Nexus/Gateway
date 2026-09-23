@@ -48,6 +48,28 @@ app.MapPost("/api/v1/auth/login", async (
     };
 });
 
+app.MapGet("/api/v1/me", (HttpContext context, SessionTokenCodec sessionTokens) =>
+{
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization,
+        sessionTokens,
+        DateTime.UtcNow);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+    var claims = authorization.Claims!;
+    return Results.Ok(new
+    {
+        accountId = claims.AccountId,
+        sessionId = claims.SessionId,
+        audience = claims.Audience,
+        instanceId = claims.InstanceId,
+        issuedAtUtc = claims.IssuedAtUtc,
+        expiresAtUtc = claims.ExpiresAtUtc
+    });
+});
+
 async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,
     HttpContext context,
