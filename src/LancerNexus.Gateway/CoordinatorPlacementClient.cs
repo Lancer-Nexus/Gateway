@@ -58,6 +58,8 @@ public sealed class CoordinatorPlacementClient(HttpClient httpClient, Coordinato
             var envelope = await response.Content.ReadFromJsonAsync<CoordinatorPlacementEnvelope>(timeout.Token);
             if (envelope is null)
                 return new CoordinatorPlacementResult(response.StatusCode, null, "coordinator_invalid_response");
+            if (envelope.Decision.RequestId != request.RequestId)
+                return new CoordinatorPlacementResult(response.StatusCode, null, "coordinator_request_id_mismatch");
             return new CoordinatorPlacementResult(response.StatusCode, envelope, null);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using LancerNexus.Gateway;
 using LancerNexus.Protocol;
 using Xunit;
@@ -66,6 +67,25 @@ public sealed class CoordinatorPlacementClientTests
         Assert.Equal("no_capacity", result.Envelope.Decision.ReasonCode);
     }
 
+    [Fact]
+    public async Task Place_RejectsResponseForAnotherRequest()
+    {
+        using var handler = new CaptureHandler(responseRequestId: Guid.NewGuid());
+        using var httpClient = new HttpClient(handler);
+        var client = new CoordinatorPlacementClient(
+            httpClient,
+            new CoordinatorGatewayOptions(
+                new Uri("https://coordinator.example/"),
+                new string('k', 32),
+                TimeSpan.FromSeconds(5)));
+
+        var result = await client.PlaceAsync(Request());
+
+        Assert.True(result.IsAvailable);
+        Assert.Null(result.Envelope);
+        Assert.Equal("coordinator_request_id_mismatch", result.Error);
+    }
+
     private static PlacementRequest Request() => new()
     {
         RequestId = Guid.NewGuid(),
@@ -80,11 +100,16 @@ public sealed class CoordinatorPlacementClientTests
     {
         private readonly HttpStatusCode statusCode;
         private readonly bool accepted;
+        private readonly Guid? responseRequestId;
 
-        public CaptureHandler(HttpStatusCode statusCode = HttpStatusCode.OK, bool accepted = true)
+        public CaptureHandler(
+            HttpStatusCode statusCode = HttpStatusCode.OK,
+            bool accepted = true,
+            Guid? responseRequestId = null)
         {
             this.statusCode = statusCode;
             this.accepted = accepted;
+            this.responseRequestId = responseRequestId;
         }
 
         public AuthenticationHeaderValue? Authorization { get; private set; }
@@ -98,12 +123,15 @@ public sealed class CoordinatorPlacementClientTests
             Authorization = request.Headers.Authorization;
             RequestUri = request.RequestUri;
             Body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            var requestPayload = JsonSerializer.Deserialize<PlacementRequest>(
+                Body,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
             return new HttpResponseMessage(statusCode)
             {
                 Content = JsonContent.Create(new CoordinatorPlacementEnvelope(
                     new PlacementDecision
                     {
-                        RequestId = Guid.NewGuid(),
+                        RequestId = responseRequestId ?? requestPayload?.RequestId ?? Guid.NewGuid(),
                         Accepted = accepted,
                         InstanceId = accepted ? "liberty-01" : null,
                         SystemId = accepted ? "li01" : null,
