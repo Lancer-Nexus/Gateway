@@ -5,6 +5,8 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHealthChecks();
 var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(coordinatorOptions);
+builder.Services.AddSingleton(SessionTokenOptions.FromConfiguration(builder.Configuration));
+builder.Services.AddSingleton<SessionTokenCodec>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 
 var app = builder.Build();
