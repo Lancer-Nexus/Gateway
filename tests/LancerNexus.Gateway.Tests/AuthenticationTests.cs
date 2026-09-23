@@ -95,6 +95,10 @@ public sealed class AuthenticationTests
         public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
             byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
             Task.FromResult<SessionRecord?>(new(account!.AccountId, nowUtc.AddMinutes(10)));
+
+        public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CharacterRecord>>([]);
     }
 
     private sealed class FixedTimeProvider(DateTime value) : TimeProvider

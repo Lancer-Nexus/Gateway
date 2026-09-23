@@ -84,6 +84,31 @@ app.MapGet("/api/v1/me", (HttpContext context, SessionTokenCodec sessionTokens) 
     });
 });
 
+app.MapGet("/api/v1/characters", async (
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    IAccountRepository accounts,
+    CancellationToken cancellationToken) =>
+{
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization,
+        sessionTokens,
+        DateTime.UtcNow);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+    try
+    {
+        var characters = await accounts.ListCharactersAsync(authorization.Claims!.AccountId, cancellationToken);
+        return Results.Ok(characters);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
 async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,
     HttpContext context,

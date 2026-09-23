@@ -9,6 +9,7 @@ public sealed record AccountRecord(
     string Status);
 
 public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
+public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
 
 public interface IAccountRepository
 {
@@ -17,6 +18,8 @@ public interface IAccountRepository
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default);
     Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class AccountRepositoryNotConfigured : IAccountRepository
@@ -32,6 +35,10 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
 
     public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
+        CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
 
@@ -144,6 +151,26 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         await reader.DisposeAsync();
         await transaction.CommitAsync(cancellationToken);
         return session;
+    }
+
+    public async Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT character_id, display_name, created_at_utc
+            FROM characters
+            WHERE account_id = @account_id
+            ORDER BY character_id;
+            """;
+        command.Parameters.AddWithValue("@account_id", accountId.ToString());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var characters = new List<CharacterRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+            characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
+        return characters;
     }
 }
 
