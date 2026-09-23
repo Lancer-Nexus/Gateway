@@ -114,6 +114,7 @@ async Task<IResult> HandlePlacement(
     HttpContext context,
     LancerNexus.Gateway.CoordinatorPlacementClient coordinator,
     LancerNexus.Gateway.SessionTokenCodec sessionTokens,
+    LancerNexus.Gateway.IAccountRepository accounts,
     CancellationToken cancellationToken)
 {
     var authorization = SessionAuthorization.Authorize(
@@ -129,6 +130,18 @@ async Task<IResult> HandlePlacement(
         string.IsNullOrWhiteSpace(request.TargetSystem) ||
         string.IsNullOrWhiteSpace(request.IdempotencyKey))
         return Results.BadRequest(new { error = "invalid_placement_request" });
+    if (request.CharacterId is { } characterId)
+    {
+        try
+        {
+            if (await accounts.FindCharacterAsync(authorization.Claims!.AccountId, characterId, cancellationToken) is null)
+                return Results.NotFound(new { error = "character_not_found" });
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+    }
 
     var result = await coordinator.PlaceAsync(request, cancellationToken);
     if (!result.IsAvailable)

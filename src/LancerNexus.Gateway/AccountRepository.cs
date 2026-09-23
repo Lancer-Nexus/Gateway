@@ -20,6 +20,8 @@ public interface IAccountRepository
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default);
+    Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class AccountRepositoryNotConfigured : IAccountRepository
@@ -38,6 +40,10 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
     public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
@@ -171,6 +177,26 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         while (await reader.ReadAsync(cancellationToken))
             characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
         return characters;
+    }
+
+    public async Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT character_id, display_name, created_at_utc
+            FROM characters
+            WHERE account_id = @account_id AND character_id = @character_id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("@account_id", accountId.ToString());
+        command.Parameters.AddWithValue("@character_id", characterId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        return new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2));
     }
 }
 

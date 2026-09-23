@@ -99,6 +99,10 @@ public sealed class AuthenticationTests
         public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<CharacterRecord>>([]);
+
+        public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<CharacterRecord?>(null);
     }
 
     private sealed class FixedTimeProvider(DateTime value) : TimeProvider
