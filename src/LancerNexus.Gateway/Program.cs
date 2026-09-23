@@ -1,4 +1,5 @@
 using LancerNexus.Gateway;
+using System.Net.Sockets;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,6 +36,7 @@ builder.Services.AddSingleton<SessionTokenCodec>();
 var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
+builder.Services.AddSingleton<JoinTicketReplayStore>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -142,7 +144,9 @@ app.MapGet("/api/v1/characters", async (
 
 app.MapPost("/api/v1/game/verify-ticket", async (
     JoinTicketVerificationRequest request,
-    JoinTicketCodec joinTickets) =>
+    JoinTicketCodec joinTickets,
+    JoinTicketReplayStore replayStore,
+    CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Ticket))
         return Results.Unauthorized();
@@ -150,6 +154,15 @@ app.MapPost("/api/v1/game/verify-ticket", async (
     if (!result.Accepted)
         return Results.Unauthorized();
     var claims = result.Claims!;
+    try
+    {
+        if (!await replayStore.TryConsumeAsync(claims.Nonce, claims.ExpiresAtUtc, cancellationToken))
+            return Results.Unauthorized();
+    }
+    catch (Exception exception) when (exception is SocketException or IOException or OperationCanceledException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
     return Results.Ok(new
     {
         guid = claims.AccountId,
