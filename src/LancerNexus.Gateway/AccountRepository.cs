@@ -8,11 +8,15 @@ public sealed record AccountRecord(
     string PasswordHash,
     string Status);
 
+public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
+
 public interface IAccountRepository
 {
     Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default);
-    Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash,
+    Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default);
+    Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default);
 }
 
 public sealed class AccountRepositoryNotConfigured : IAccountRepository
@@ -22,8 +26,12 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
-    public Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash,
+    public Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
 
@@ -60,7 +68,7 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
             reader.GetString(3));
     }
 
-    public async Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash,
+    public async Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = new MySqlConnection(connectionString);
@@ -68,19 +76,73 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO gateway_sessions
-                (session_id, account_id, token_nonce_hash, created_at_utc,
+                (session_id, account_id, token_nonce_hash, refresh_token_hash, created_at_utc,
                  last_seen_at_utc, expires_at_utc)
             VALUES
-                (@session_id, @account_id, @token_nonce_hash, @created_at_utc,
+                (@session_id, @account_id, @token_nonce_hash, @refresh_token_hash, @created_at_utc,
                  @last_seen_at_utc, @expires_at_utc);
             """;
         command.Parameters.AddWithValue("@session_id", sessionId.ToString());
         command.Parameters.AddWithValue("@account_id", accountId.ToString());
         command.Parameters.AddWithValue("@token_nonce_hash", nonceHash);
+        command.Parameters.AddWithValue("@refresh_token_hash", refreshTokenHash);
         command.Parameters.AddWithValue("@created_at_utc", createdAtUtc);
         command.Parameters.AddWithValue("@last_seen_at_utc", createdAtUtc);
         command.Parameters.AddWithValue("@expires_at_utc", expiresAtUtc);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE gateway_sessions
+            SET refresh_token_hash = @new_refresh_token_hash,
+                last_seen_at_utc = @now_utc
+            WHERE session_id = @session_id
+              AND refresh_token_hash = @old_refresh_token_hash
+              AND revoked_at_utc IS NULL
+              AND expires_at_utc > @now_utc;
+            """;
+        update.Parameters.AddWithValue("@new_refresh_token_hash", newRefreshTokenHash);
+        update.Parameters.AddWithValue("@session_id", sessionId.ToString());
+        update.Parameters.AddWithValue("@old_refresh_token_hash", oldRefreshTokenHash);
+        update.Parameters.AddWithValue("@now_utc", nowUtc);
+        if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
+        await using var select = connection.CreateCommand();
+        select.Transaction = transaction;
+        select.CommandText = """
+            SELECT s.account_id, s.expires_at_utc
+            FROM gateway_sessions s
+            INNER JOIN accounts a ON a.account_id = s.account_id
+            WHERE s.session_id = @session_id AND a.status = 'active';
+            """;
+        select.Parameters.AddWithValue("@session_id", sessionId.ToString());
+        await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+        var accountId = reader.GetValue(0) switch
+        {
+            Guid value => value,
+            string value => Guid.Parse(value),
+            _ => throw new InvalidDataException("Gateway account_id has an unsupported database type.")
+        };
+        var session = new SessionRecord(accountId, reader.GetDateTime(1));
+        await transaction.CommitAsync(cancellationToken);
+        return session;
     }
 }
 

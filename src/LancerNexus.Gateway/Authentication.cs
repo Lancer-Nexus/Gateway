@@ -6,12 +6,14 @@ namespace LancerNexus.Gateway;
 
 public sealed record LoginRequest(string Email, string Password);
 
-public sealed record LoginResponse(string AccessToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
+public sealed record LoginResponse(string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
+public sealed record RefreshRequest(Guid SessionId, string RefreshToken);
 
 public enum LoginFailure
 {
     None,
     InvalidCredentials,
+    InvalidRefreshToken,
     PersistenceUnavailable,
     TokenSigningUnavailable
 }
@@ -77,10 +79,12 @@ public sealed class GatewayAuthenticationService(
         var expires = now.Add(tokenOptions.Lifetime);
         try
         {
+            var refreshToken = CreateNonce();
             await accounts.CreateSessionAsync(
                 sessionId,
                 account.AccountId,
                 SHA256.HashData(Encoding.UTF8.GetBytes(nonce)),
+                SHA256.HashData(Encoding.UTF8.GetBytes(refreshToken)),
                 now,
                 expires,
                 cancellationToken);
@@ -94,12 +98,55 @@ public sealed class GatewayAuthenticationService(
                 Nonce = nonce,
                 KeyId = tokenOptions.KeyId
             });
-            return new LoginResult(new LoginResponse(token, account.AccountId, sessionId, expires), LoginFailure.None);
+            return new LoginResult(new LoginResponse(token, refreshToken, account.AccountId, sessionId, expires), LoginFailure.None);
         }
         catch (InvalidOperationException)
         {
             return new LoginResult(null, LoginFailure.PersistenceUnavailable);
         }
+    }
+
+    public async Task<LoginResult> RefreshAsync(RefreshRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.SessionId == Guid.Empty || string.IsNullOrWhiteSpace(request.RefreshToken))
+            return new LoginResult(null, LoginFailure.InvalidRefreshToken);
+        if (!tokenOptions.IsConfigured)
+            return new LoginResult(null, LoginFailure.TokenSigningUnavailable);
+
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var newRefreshToken = CreateNonce();
+        SessionRecord? session;
+        try
+        {
+            session = await accounts.RotateRefreshTokenAsync(
+                request.SessionId,
+                SHA256.HashData(Encoding.UTF8.GetBytes(request.RefreshToken)),
+                SHA256.HashData(Encoding.UTF8.GetBytes(newRefreshToken)),
+                now,
+                cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            return new LoginResult(null, LoginFailure.PersistenceUnavailable);
+        }
+        if (session is null)
+            return new LoginResult(null, LoginFailure.InvalidRefreshToken);
+
+        var accessNonce = CreateNonce();
+        var expires = session.ExpiresAtUtc < now.Add(tokenOptions.Lifetime)
+            ? session.ExpiresAtUtc
+            : now.Add(tokenOptions.Lifetime);
+        var token = tokenCodec.Issue(new SessionTokenClaims
+        {
+            SessionId = request.SessionId,
+            AccountId = session.AccountId,
+            Audience = tokenOptions.Audience,
+            IssuedAtUtc = now,
+            ExpiresAtUtc = expires,
+            Nonce = accessNonce,
+            KeyId = tokenOptions.KeyId
+        });
+        return new LoginResult(new LoginResponse(token, newRefreshToken, session.AccountId, request.SessionId, expires), LoginFailure.None);
     }
 
     private static string CreateNonce()

@@ -48,6 +48,20 @@ app.MapPost("/api/v1/auth/login", async (
     };
 });
 
+app.MapPost("/api/v1/auth/refresh", async (
+    RefreshRequest request,
+    GatewayAuthenticationService authentication,
+    CancellationToken cancellationToken) =>
+{
+    var result = await authentication.RefreshAsync(request, cancellationToken);
+    return result.Failure switch
+    {
+        LoginFailure.None => Results.Ok(result.Response),
+        LoginFailure.InvalidRefreshToken => Results.Unauthorized(),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+});
+
 app.MapGet("/api/v1/me", (HttpContext context, SessionTokenCodec sessionTokens) =>
 {
     var authorization = SessionAuthorization.AuthorizeToken(
