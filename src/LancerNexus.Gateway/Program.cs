@@ -7,6 +7,11 @@ var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Con
 builder.Services.AddSingleton(coordinatorOptions);
 builder.Services.AddSingleton(SessionTokenOptions.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton<SessionTokenCodec>();
+var gatewayConnectionString = builder.Configuration.GetConnectionString("Gateway");
+builder.Services.AddSingleton<IAccountRepository>(_ =>
+    string.IsNullOrWhiteSpace(gatewayConnectionString)
+        ? new AccountRepositoryNotConfigured()
+        : new MySqlAccountRepository(gatewayConnectionString));
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 
 var app = builder.Build();

@@ -42,3 +42,5 @@ The service exposes liveness, readiness and protocol-capability endpoints plus a
 ## MySQL schema
 
 Gateway owns the identity/session/character schema and its lease fencing boundary. The forward-only migration in [`db/migrations/001_identity_and_leases.sql`](db/migrations/001_identity_and_leases.sql) creates accounts, sessions, characters and `lease_version`-based character leases. Apply it with the deployment migration runner after selecting the Gateway database; it is not executed automatically by the service and contains no credentials.
+
+The Gateway uses `MySqlConnector` for account reads through `IAccountRepository`. With an empty `ConnectionStrings:Gateway` setting the service registers a fail-closed repository and does not provide demo or in-memory accounts. Password verification and login/session creation are the next layer on top of this boundary.
