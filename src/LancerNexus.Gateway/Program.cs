@@ -140,6 +140,26 @@ app.MapGet("/api/v1/characters", async (
     }
 });
 
+app.MapPost("/api/v1/game/verify-ticket", async (
+    JoinTicketVerificationRequest request,
+    JoinTicketCodec joinTickets) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Ticket))
+        return Results.Unauthorized();
+    var result = joinTickets.Validate(request.Ticket, DateTime.UtcNow);
+    if (!result.Accepted)
+        return Results.Unauthorized();
+    var claims = result.Claims!;
+    return Results.Ok(new
+    {
+        guid = claims.AccountId,
+        sessionId = claims.SessionId,
+        characterId = claims.CharacterId,
+        instanceId = claims.InstanceId,
+        systemId = claims.SystemId
+    });
+});
+
 async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,
     HttpContext context,
@@ -238,3 +258,5 @@ static int ReadPositiveLimit(IConfiguration configuration, string key, int defau
 }
 
 public partial class Program;
+
+public sealed record JoinTicketVerificationRequest(string Ticket);
