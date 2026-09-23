@@ -38,3 +38,7 @@ dotnet test tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj --c
 ```
 
 The service exposes liveness, readiness and protocol-capability endpoints plus authenticated `POST /api/v1/placement/request` (with `/api/v1/placement` retained as a compatibility alias). Placement requests require a valid Gateway access token whose `session_id` matches the request, then are forwarded to the Coordinator over its private HTTPS endpoint with a bearer key and idempotency key. The `SessionTokenCodec` signs short-lived access-token claims with HMAC-SHA256 and validates audience, expiry, nonce and key id; signing remains disabled until a protected key is configured. If token signing or the Coordinator URL/key is missing or invalid, the Gateway fails closed with `503`; it never makes a local placement decision.
+
+## MySQL schema
+
+Gateway owns the identity/session/character schema and its lease fencing boundary. The forward-only migration in [`db/migrations/001_identity_and_leases.sql`](db/migrations/001_identity_and_leases.sql) creates accounts, sessions, characters and `lease_version`-based character leases. Apply it with the deployment migration runner after selecting the Gateway database; it is not executed automatically by the service and contains no credentials.
