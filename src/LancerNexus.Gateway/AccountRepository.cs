@@ -47,8 +47,14 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return null;
+        var accountId = reader.GetValue(0) switch
+        {
+            Guid value => value,
+            string value => Guid.Parse(value),
+            _ => throw new InvalidDataException("Gateway account_id has an unsupported database type.")
+        };
         return new AccountRecord(
-            Guid.Parse(reader.GetString(0)),
+            accountId,
             reader.GetString(1),
             reader.GetString(2),
             reader.GetString(3));
