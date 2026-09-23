@@ -46,6 +46,26 @@ public sealed class CoordinatorPlacementClientTests
         Assert.Equal("coordinator_not_configured", result.Error);
     }
 
+    [Fact]
+    public async Task Place_PreservesCoordinatorRejectionEnvelope()
+    {
+        using var handler = new CaptureHandler(HttpStatusCode.Conflict, accepted: false);
+        using var httpClient = new HttpClient(handler);
+        var client = new CoordinatorPlacementClient(
+            httpClient,
+            new CoordinatorGatewayOptions(
+                new Uri("https://coordinator.example/"),
+                new string('k', 32),
+                TimeSpan.FromSeconds(5)));
+
+        var result = await client.PlaceAsync(Request());
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal(HttpStatusCode.Conflict, result.StatusCode);
+        Assert.False(result.Envelope!.Decision.Accepted);
+        Assert.Equal("no_capacity", result.Envelope.Decision.ReasonCode);
+    }
+
     private static PlacementRequest Request() => new()
     {
         RequestId = Guid.NewGuid(),
@@ -58,6 +78,15 @@ public sealed class CoordinatorPlacementClientTests
 
     private sealed class CaptureHandler : HttpMessageHandler
     {
+        private readonly HttpStatusCode statusCode;
+        private readonly bool accepted;
+
+        public CaptureHandler(HttpStatusCode statusCode = HttpStatusCode.OK, bool accepted = true)
+        {
+            this.statusCode = statusCode;
+            this.accepted = accepted;
+        }
+
         public AuthenticationHeaderValue? Authorization { get; private set; }
         public string? Body { get; private set; }
         public Uri? RequestUri { get; private set; }
@@ -69,17 +98,17 @@ public sealed class CoordinatorPlacementClientTests
             Authorization = request.Headers.Authorization;
             RequestUri = request.RequestUri;
             Body = await request.Content!.ReadAsStringAsync(cancellationToken);
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            return new HttpResponseMessage(statusCode)
             {
                 Content = JsonContent.Create(new CoordinatorPlacementEnvelope(
                     new PlacementDecision
                     {
                         RequestId = Guid.NewGuid(),
-                        Accepted = true,
-                        InstanceId = "liberty-01",
-                        SystemId = "li01",
-                        Endpoint = "10.20.0.31:2300",
-                        ReasonCode = "assigned",
+                        Accepted = accepted,
+                        InstanceId = accepted ? "liberty-01" : null,
+                        SystemId = accepted ? "li01" : null,
+                        Endpoint = accepted ? "10.20.0.31:2300" : null,
+                        ReasonCode = accepted ? "assigned" : "no_capacity",
                         ExpiresUtc = DateTime.UtcNow.AddSeconds(15)
                     },
                     false))
