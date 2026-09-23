@@ -27,9 +27,20 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 
 async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,
+    HttpContext context,
     LancerNexus.Gateway.CoordinatorPlacementClient coordinator,
+    LancerNexus.Gateway.SessionTokenCodec sessionTokens,
     CancellationToken cancellationToken)
 {
+    var authorization = SessionAuthorization.Authorize(
+        context.Request.Headers.Authorization,
+        request,
+        sessionTokens,
+        DateTime.UtcNow);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
     if (request.RequestId == Guid.Empty || request.SessionId == Guid.Empty ||
         string.IsNullOrWhiteSpace(request.TargetSystem) ||
         string.IsNullOrWhiteSpace(request.IdempotencyKey))
