@@ -37,4 +37,4 @@ dotnet build tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj --
 dotnet test tests/LancerNexus.Gateway.Tests/LancerNexus.Gateway.Tests.csproj --configuration Release --no-build
 ```
 
-The initial service exposes only liveness, readiness and protocol-capability endpoints. Authentication, Coordinator placement and persistence are added behind these boundaries in subsequent changes.
+The service exposes liveness, readiness and protocol-capability endpoints plus `POST /api/v1/placement`. Placement requests are validated at the public boundary and forwarded to the Coordinator over its private HTTPS endpoint with a bearer key and idempotency key. If the Coordinator URL or key is missing/invalid, the Gateway fails closed with `503`; it never makes a local placement decision.
