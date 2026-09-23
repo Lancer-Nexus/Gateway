@@ -32,6 +32,9 @@ builder.Services.AddSingleton(coordinatorOptions);
 var sessionTokenOptions = SessionTokenOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(sessionTokenOptions);
 builder.Services.AddSingleton<SessionTokenCodec>();
+var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(joinTicketOptions);
+builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -59,7 +62,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1" }
 }));
 
 app.MapPost("/api/v1/auth/login", async (
@@ -142,6 +145,7 @@ async Task<IResult> HandlePlacement(
     HttpContext context,
     LancerNexus.Gateway.CoordinatorPlacementClient coordinator,
     LancerNexus.Gateway.SessionTokenCodec sessionTokens,
+    LancerNexus.Gateway.JoinTicketCodec joinTickets,
     LancerNexus.Gateway.IAccountRepository accounts,
     CancellationToken cancellationToken)
 {
@@ -176,9 +180,48 @@ async Task<IResult> HandlePlacement(
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     if (result.Envelope is null)
         return Results.StatusCode(StatusCodes.Status502BadGateway);
-    return result.Envelope.Decision.Accepted
-        ? Results.Ok(result.Envelope)
-        : Results.Conflict(result.Envelope);
+    if (!result.Envelope.Decision.Accepted)
+        return Results.Conflict(result.Envelope);
+    if (string.IsNullOrWhiteSpace(result.Envelope.Decision.InstanceId) ||
+        string.IsNullOrWhiteSpace(result.Envelope.Decision.SystemId) ||
+        string.IsNullOrWhiteSpace(result.Envelope.Decision.Endpoint))
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    try
+    {
+        var now = DateTime.UtcNow;
+        var expires = result.Envelope.Decision.ExpiresUtc;
+        var ticket = joinTickets.Issue(new LancerNexus.Protocol.JoinTicketClaims
+        {
+            SessionId = request.SessionId,
+            AccountId = authorization.Claims!.AccountId,
+            CharacterId = request.CharacterId,
+            InstanceId = result.Envelope.Decision.InstanceId,
+            SystemId = result.Envelope.Decision.SystemId,
+            Endpoint = result.Envelope.Decision.Endpoint,
+            IssuedAtUtc = now,
+            ExpiresAtUtc = expires,
+            Nonce = Guid.NewGuid().ToString("N"),
+            Audience = joinTicketOptions.Audience,
+            KeyId = joinTicketOptions.KeyId
+        });
+        var decision = result.Envelope.Decision;
+        var response = new CoordinatorPlacementEnvelope(new LancerNexus.Protocol.PlacementDecision
+        {
+            RequestId = decision.RequestId,
+            Accepted = decision.Accepted,
+            InstanceId = decision.InstanceId,
+            SystemId = decision.SystemId,
+            Endpoint = decision.Endpoint,
+            ReasonCode = decision.ReasonCode,
+            ExpiresUtc = decision.ExpiresUtc,
+            JoinTicket = ticket
+        }, result.Envelope.Duplicate);
+        return Results.Ok(response);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
 }
 
 app.MapPost("/api/v1/placement/request", HandlePlacement).RequireRateLimiting("placement");

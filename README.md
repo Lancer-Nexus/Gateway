@@ -45,6 +45,8 @@ Gateway owns the identity/session/character schema and its lease fencing boundar
 
 The Gateway uses `MySqlConnector` for account reads and session creation through `IAccountRepository`. `POST /api/v1/auth/login` verifies bcrypt hashes, persists the session nonce hash and returns a signed short-lived token. Redis is configured through `Gateway:RedisEndpoint` and is checked with a bounded PING during readiness; it remains transient infrastructure and never replaces MySQL authority. With an empty `ConnectionStrings:Gateway` setting the service registers a fail-closed repository and does not provide demo or in-memory accounts; login returns `503` until the database and signing key are configured.
 
+Successful placement responses contain a short-lived `JoinTicket` bound to the session, account, optional character, target instance/system and endpoint. The ticket uses the separate `Gateway:JoinTicketSigningKey` and must be validated by the target game server before accepting a client connection; it is not a replacement for the MySQL lease.
+
 Login and placement use separate per-client-IP fixed-window limits from `Gateway:LoginRateLimitPerMinute` and `Gateway:PlacementRateLimitPerMinute`; rejected requests receive HTTP `429` before account or Coordinator work starts.
 
 `/health/live` is process liveness only. `/health/ready` fails closed until the signing key, Coordinator API key/URL, Gateway MySQL connection and Redis endpoint are configured and both `SELECT 1` and Redis `PING` succeed.
