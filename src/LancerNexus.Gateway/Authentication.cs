@@ -4,7 +4,7 @@ using LancerNexus.Protocol;
 
 namespace LancerNexus.Gateway;
 
-public sealed record LoginRequest(string Email, string Password);
+public sealed record LoginRequest(string Email, string Password, string? HandshakeToken = null);
 
 public sealed record LoginResponse(string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
 public sealed record RefreshRequest(Guid SessionId, string RefreshToken);

@@ -49,4 +49,10 @@ Successful placement responses contain a short-lived, single-use `JoinTicket` bo
 
 Login and placement use separate per-client-IP fixed-window limits from `Gateway:LoginRateLimitPerMinute` and `Gateway:PlacementRateLimitPerMinute`; rejected requests receive HTTP `429` before account or Coordinator work starts.
 
+## Client version handshake
+
+Before login, clients POST the shared `ClientVersionHello` contract to `/api/v1/client/version`. The Gateway compares protocol, data manifest, channel, platform and minimum/latest client versions from `Gateway:ClientProtocolVersion`, `Gateway:RequiredDataManifestId`, `Gateway:ClientChannel`, `Gateway:MinimumClientVersion` and `Gateway:LatestClientVersion`. Supported and recommended versions receive a five-minute, domain-separated HMAC handshake token. The client submits it as `handshakeToken` in the login JSON; missing, invalid or expired proof receives HTTP 428 before password verification. Required updates and unsupported protocols receive no proof. This proof establishes compatibility only and grants no account or placement rights. The Gateway does not supply a download URL; the local updater uses its configured signed manifest source.
+
+The proof is bound to the reported version, protocol, data manifest, platform and channel. Those fields are checked again at login, so a policy change can invalidate a proof that was issued minutes earlier.
+
 `/health/live` is process liveness only. `/health/ready` fails closed until the signing key, Coordinator API key/URL, Gateway MySQL connection and Redis endpoint are configured and both `SELECT 1` and Redis `PING` succeed.

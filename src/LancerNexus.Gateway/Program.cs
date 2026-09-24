@@ -1,4 +1,6 @@
 using LancerNexus.Gateway;
+using LancerNexus.Protocol;
+using MySqlConnector;
 using System.Net.Sockets;
 using System.Threading.RateLimiting;
 
@@ -33,6 +35,8 @@ builder.Services.AddSingleton(coordinatorOptions);
 var sessionTokenOptions = SessionTokenOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(sessionTokenOptions);
 builder.Services.AddSingleton<SessionTokenCodec>();
+builder.Services.AddSingleton(ClientVersionPolicy.FromConfiguration(builder.Configuration));
+builder.Services.AddSingleton<ClientVersionHandshake>();
 var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
@@ -51,6 +55,7 @@ builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 
 var app = builder.Build();
+await LogStartupDiagnosticsAsync(app, gatewayConnectionString, coordinatorOptions, sessionTokenOptions);
 app.UseRateLimiter();
 
 app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
@@ -64,14 +69,25 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "client_version_hello_v1" }
 }));
+
+app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
+{
+    try { return Results.Ok(handshake.Evaluate(hello)); }
+    catch (ArgumentException) { return Results.BadRequest(new { error = "invalid_client_version_hello" }); }
+    catch (InvalidOperationException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+}).RequireRateLimiting("login");
 
 app.MapPost("/api/v1/auth/login", async (
     LoginRequest request,
+    ClientVersionHandshake handshake,
     GatewayAuthenticationService authentication,
     CancellationToken cancellationToken) =>
 {
+    if (!handshake.ValidateProof(request.HandshakeToken))
+        return Results.Json(new { error = "client_version_handshake_required" },
+            statusCode: StatusCodes.Status428PreconditionRequired);
     var result = await authentication.LoginAsync(request, cancellationToken);
     return result.Failure switch
     {
@@ -152,12 +168,18 @@ app.MapPost("/api/v1/game/verify-ticket", async (
         return Results.Unauthorized();
     var result = joinTickets.Validate(request.Ticket, DateTime.UtcNow);
     if (!result.Accepted)
+    {
+        app.Logger.LogWarning("Game join ticket rejected: {ReasonCode}.", result.ReasonCode);
         return Results.Unauthorized();
+    }
     var claims = result.Claims!;
     try
     {
         if (!await replayStore.TryConsumeAsync(claims.Nonce, claims.ExpiresAtUtc, cancellationToken))
+        {
+            app.Logger.LogWarning("Game join ticket replay rejected.");
             return Results.Unauthorized();
+        }
     }
     catch (Exception exception) when (exception is SocketException or IOException or OperationCanceledException)
     {
@@ -270,6 +292,72 @@ static int ReadPositiveLimit(IConfiguration configuration, string key, int defau
     return value;
 }
 
-public partial class Program;
+static async Task LogStartupDiagnosticsAsync(
+    WebApplication app,
+    string? connectionString,
+    CoordinatorGatewayOptions coordinatorOptions,
+    SessionTokenOptions tokenOptions)
+{
+    var logger = app.Logger;
+    var redisConfigured = !string.IsNullOrWhiteSpace(app.Configuration["Gateway:RedisEndpoint"]);
+    logger.LogInformation(
+        "Gateway configuration: MySQL {MySqlConfiguration}, Redis {RedisConfiguration}, Coordinator API {CoordinatorConfiguration}, token signing {TokenSigningConfiguration}",
+        string.IsNullOrWhiteSpace(connectionString) ? "not configured" : "configured",
+        redisConfigured ? "configured" : "not configured",
+        coordinatorOptions.IsConfigured ? "configured" : "not configured",
+        tokenOptions.IsConfigured ? "configured" : "not configured");
 
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        logger.LogWarning("Gateway MySQL probe skipped: ConnectionStrings:Gateway is missing; readiness remains unhealthy.");
+    }
+    else
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await using var connection = new MySqlConnection(connectionString);
+            await connection.OpenAsync(timeout.Token);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT 1;";
+            _ = await command.ExecuteScalarAsync(timeout.Token);
+            logger.LogInformation("Gateway MySQL probe succeeded: connection opened and SELECT 1 returned.");
+        }
+        catch (Exception exception) when (exception is MySqlException or SocketException or IOException or OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Gateway MySQL probe failed ({FailureType}, MySQL error {MySqlErrorNumber}); readiness remains unhealthy.",
+                exception.GetType().Name,
+                exception is MySqlException mysqlException ? mysqlException.Number : 0);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(
+                "Gateway MySQL probe failed with {FailureType}; connection details are omitted.",
+                exception.GetType().Name);
+        }
+    }
+
+    if (!coordinatorOptions.IsConfigured)
+    {
+        logger.LogWarning("Gateway Coordinator probe skipped: HTTPS endpoint or internal API key is not configured.");
+        return;
+    }
+
+    try
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        using var response = await client.GetAsync(new Uri(coordinatorOptions.BaseAddress!, "health/ready"));
+        if (response.IsSuccessStatusCode)
+            logger.LogInformation("Gateway Coordinator probe succeeded: readiness endpoint returned HTTP {StatusCode}.", (int)response.StatusCode);
+        else
+            logger.LogWarning("Gateway Coordinator probe returned HTTP {StatusCode}; placement may be unavailable.", (int)response.StatusCode);
+    }
+    catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+    {
+        logger.LogWarning("Gateway Coordinator probe failed ({FailureType}); placement may be unavailable.", exception.GetType().Name);
+    }
+}
+
+public partial class Program;
 public sealed record JoinTicketVerificationRequest(string Ticket);

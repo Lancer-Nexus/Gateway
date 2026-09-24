@@ -18,7 +18,7 @@ public sealed class JoinTicketReplayStore(IConfiguration configuration)
         using var redis = new TcpClient();
         await redis.ConnectAsync(host, port, timeout.Token);
         await using var stream = redis.GetStream();
-        var command = $"*5\r\n$3\r\nSET\r\n${key.Length}\r\n{key}\r\n$1\r\n1\r\n$2\r\nNX\r\n$2\r\nEX\r\n${seconds.ToString().Length}\r\n{seconds}\r\n";
+        var command = $"*6\r\n$3\r\nSET\r\n${key.Length}\r\n{key}\r\n$1\r\n1\r\n$2\r\nNX\r\n$2\r\nEX\r\n${seconds.ToString().Length}\r\n{seconds}\r\n";
         await stream.WriteAsync(Encoding.ASCII.GetBytes(command), timeout.Token);
         var response = new byte[5];
         var read = 0;
