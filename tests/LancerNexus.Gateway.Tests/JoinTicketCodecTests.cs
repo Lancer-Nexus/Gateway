@@ -36,9 +36,16 @@ public sealed class JoinTicketCodecTests
 
     private static JoinTicketClaims Claims(DateTime now) => new()
     {
-        SessionId = Guid.NewGuid(), AccountId = Guid.NewGuid(), CharacterId = 7,
-        InstanceId = "liberty-01", SystemId = "li01", Endpoint = "10.20.0.31:2300",
-        IssuedAtUtc = now, ExpiresAtUtc = now.AddMinutes(2), Nonce = "nonce-01",
-        Audience = "game-server", KeyId = "join-01"
+        SessionId = Guid.NewGuid(),
+        AccountId = Guid.NewGuid(),
+        CharacterId = 7,
+        InstanceId = "liberty-01",
+        SystemId = "li01",
+        Endpoint = "10.20.0.31:2300",
+        IssuedAtUtc = now,
+        ExpiresAtUtc = now.AddMinutes(2),
+        Nonce = "nonce-01",
+        Audience = "game-server",
+        KeyId = "join-01"
     };
 }
