@@ -57,6 +57,8 @@ builder.Services.AddSingleton(transferTicketOptions);
 builder.Services.AddSingleton<TransferTicketCodec>();
 builder.Services.AddTransient<TransferInitiationService>();
 builder.Services.AddTransient<TransferTicketAdmissionService>();
+builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
+builder.Services.AddTransient<TransferAcceptanceService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -86,7 +88,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_accept_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -215,8 +217,13 @@ app.MapPost("/api/v1/game/verify-ticket", async (
 app.MapPost("/api/v1/game/verify-transfer-ticket", async (
     TransferTicketVerificationRequest request,
     TransferTicketAdmissionService admission,
+    GameInstanceKeyAuthenticator gameInstances,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
+    if (!gameInstances.TryAuthenticate(context.Request, out var instanceId) ||
+        !string.Equals(instanceId, request.TargetInstanceId, StringComparison.Ordinal))
+        return Results.Unauthorized();
     var result = await admission.VerifyAsync(request, cancellationToken);
     if (result.Accepted)
     {
@@ -242,6 +249,46 @@ app.MapPost("/api/v1/game/verify-transfer-ticket", async (
             Results.StatusCode(StatusCodes.Status502BadGateway),
         _ => Results.Unauthorized()
     };
+}).RequireRateLimiting("transfer");
+
+app.MapPost("/api/v1/game/accept-transfer", async (
+    TransferTargetAcceptanceRequest request,
+    TransferAcceptanceService acceptance,
+    GameInstanceKeyAuthenticator gameInstances,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    if (!gameInstances.TryAuthenticate(context.Request, out var instanceId))
+        return Results.Unauthorized();
+    TransferAcceptanceResult result;
+    try
+    {
+        result = await acceptance.AcceptAsync(request, instanceId, cancellationToken);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+    if (!result.Accepted)
+    {
+        app.Logger.LogWarning("Game transfer acceptance rejected: {ReasonCode}.", result.ReasonCode);
+        return result.Failure switch
+        {
+            TransferAcceptanceFailure.CoordinatorUnavailable or TransferAcceptanceFailure.PersistenceUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferAcceptanceFailure.CoordinatorInvalidResponse =>
+                Results.StatusCode(StatusCodes.Status502BadGateway),
+            TransferAcceptanceFailure.PersistenceRejected =>
+                Results.Conflict(new { error = result.ReasonCode }),
+            _ => Results.Unauthorized()
+        };
+    }
+    return Results.Ok(new
+    {
+        transferId = result.TransferId,
+        instanceId,
+        leaseVersion = result.LeaseVersion
+    });
 }).RequireRateLimiting("transfer");
 
 async Task<IResult> HandlePlacement(

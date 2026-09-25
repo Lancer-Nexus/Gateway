@@ -16,6 +16,8 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Never log passwords, access tokens, refresh tokens or transfer-ticket secrets.
 - Passwords are accepted only at the authentication boundary and are never forwarded to game servers.
 - Validate token issuer, audience, expiry, account, session, target instance and transfer-ticket state.
+- Authenticate game-instance calls with distinct per-instance bearer keys and derive the caller's instance ID from that credential; never trust an unauthenticated instance ID for ticket verification or lease transfer.
+- Switch character leases only after Coordinator records `TargetAccepted`; use the MySQL transfer journal for idempotent retries, then advance Coordinator to `Committed`.
 - Use MySQL transactions for account and character ownership changes.
 - Use idempotency keys for login, assignment and transfer operations where retries are possible.
 - Do not make placement decisions independently of the Coordinator except during an explicitly documented degraded mode.
