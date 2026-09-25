@@ -28,9 +28,17 @@ public sealed record CoordinatorTransferStateResult(
 }
 
 public sealed record CoordinatorTransferOutcome(bool Accepted, string ReasonCode, TransferState State, bool Duplicate);
+public sealed record CoordinatorTransferSnapshot(Guid TransferId, TransferPrepareRequest Request,
+    TransferState State, DateTime ExpiresUtc, long LeaseVersion);
+public sealed record CoordinatorTransferLookupResult(HttpStatusCode? StatusCode,
+    CoordinatorTransferSnapshot? Transfer, string? Error)
+{
+    public bool IsAvailable => StatusCode is not null;
+}
 
 public interface ICoordinatorTransferClient
 {
+    Task<CoordinatorTransferLookupResult> GetTransferAsync(Guid transferId, CancellationToken cancellationToken = default);
     Task<CoordinatorTransferCallResult> PrepareAsync(TransferPrepareRequest request,
         CancellationToken cancellationToken = default);
     Task<CoordinatorTransferStateResult> MarkSourceFrozenAsync(Guid transferId,
@@ -48,6 +56,29 @@ public interface ICoordinatorTransferClient
 public sealed class CoordinatorTransferClient(HttpClient httpClient, CoordinatorGatewayOptions options)
     : ICoordinatorTransferClient
 {
+    public async Task<CoordinatorTransferLookupResult> GetTransferAsync(Guid transferId,
+        CancellationToken cancellationToken = default)
+    {
+        if (transferId == Guid.Empty)
+            return new(null, null, "invalid_transfer_id");
+        if (!options.IsConfigured)
+            return new(null, null, "coordinator_not_configured");
+        using var message = CreateRequest(HttpMethod.Get, $"internal/v1/transfers/{transferId:D}");
+        var send = await SendAsync(message, cancellationToken);
+        using var response = send.Response;
+        if (response is null)
+            return new(null, null, send.Error);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return new(response.StatusCode, null, null);
+        if (!response.IsSuccessStatusCode)
+            return new(response.StatusCode, null, "coordinator_lookup_rejected");
+        var transfer = await response.Content.ReadFromJsonAsync<CoordinatorTransferSnapshot>(cancellationToken);
+        if (transfer is null || transfer.TransferId != transferId || transfer.Request is null ||
+            transfer.Request.TransferId != transferId)
+            return new(response.StatusCode, null, "coordinator_invalid_response");
+        return new(response.StatusCode, transfer, null);
+    }
+
     public Task<CoordinatorTransferCallResult> PrepareAsync(
         TransferPrepareRequest request,
         CancellationToken cancellationToken = default) =>

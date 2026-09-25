@@ -4,15 +4,26 @@ using System.Text;
 
 namespace LancerNexus.Gateway;
 
-public sealed class JoinTicketReplayStore(IConfiguration configuration)
+public interface ITransferTicketReplayStore
 {
-    public async Task<bool> TryConsumeAsync(string nonce, DateTime expiresUtc, CancellationToken cancellationToken)
+    Task<bool> TryConsumeTransferAsync(string nonce, DateTime expiresUtc, CancellationToken cancellationToken);
+}
+
+public sealed class JoinTicketReplayStore(IConfiguration configuration) : ITransferTicketReplayStore
+{
+    public Task<bool> TryConsumeAsync(string nonce, DateTime expiresUtc, CancellationToken cancellationToken) =>
+        TryConsumeAsync("lancer-nexus:join-ticket:", nonce, expiresUtc, cancellationToken);
+
+    public Task<bool> TryConsumeTransferAsync(string nonce, DateTime expiresUtc, CancellationToken cancellationToken) =>
+        TryConsumeAsync("lancer-nexus:transfer-ticket:", nonce, expiresUtc, cancellationToken);
+
+    private async Task<bool> TryConsumeAsync(string keyPrefix, string nonce, DateTime expiresUtc, CancellationToken cancellationToken)
     {
         var endpoint = configuration["Gateway:RedisEndpoint"];
         if (!TryParseEndpoint(endpoint, out var host, out var port))
             throw new InvalidOperationException("Gateway:RedisEndpoint is not configured.");
         var seconds = Math.Max(1, (int)Math.Ceiling((expiresUtc - DateTime.UtcNow).TotalSeconds));
-        var key = $"lancer-nexus:join-ticket:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce)))}";
+        var key = $"{keyPrefix}{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce)))}";
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         using var redis = new TcpClient();

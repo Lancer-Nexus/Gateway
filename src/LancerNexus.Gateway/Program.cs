@@ -51,10 +51,12 @@ var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuratio
 builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<JoinTicketReplayStore>();
+builder.Services.AddSingleton<ITransferTicketReplayStore>(services => services.GetRequiredService<JoinTicketReplayStore>());
 var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(transferTicketOptions);
 builder.Services.AddSingleton<TransferTicketCodec>();
 builder.Services.AddTransient<TransferInitiationService>();
+builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -84,7 +86,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -209,6 +211,38 @@ app.MapPost("/api/v1/game/verify-ticket", async (
         systemId = claims.SystemId
     });
 });
+
+app.MapPost("/api/v1/game/verify-transfer-ticket", async (
+    TransferTicketVerificationRequest request,
+    TransferTicketAdmissionService admission,
+    CancellationToken cancellationToken) =>
+{
+    var result = await admission.VerifyAsync(request, cancellationToken);
+    if (result.Accepted)
+    {
+        var claims = result.Claims!;
+        return Results.Ok(new
+        {
+            guid = claims.AccountId,
+            sessionId = claims.SessionId,
+            transferId = claims.TransferId,
+            characterId = claims.CharacterId,
+            sourceInstanceId = claims.SourceInstanceId,
+            instanceId = claims.TargetInstanceId,
+            systemId = claims.TargetSystemId,
+            leaseVersion = claims.LeaseVersion
+        });
+    }
+    app.Logger.LogWarning("Game transfer ticket rejected: {ReasonCode}.", result.ReasonCode);
+    return result.Failure switch
+    {
+        TransferTicketAdmissionFailure.CoordinatorUnavailable or TransferTicketAdmissionFailure.ReplayStoreUnavailable =>
+            Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        TransferTicketAdmissionFailure.CoordinatorInvalidResponse =>
+            Results.StatusCode(StatusCodes.Status502BadGateway),
+        _ => Results.Unauthorized()
+    };
+}).RequireRateLimiting("transfer");
 
 async Task<IResult> HandlePlacement(
     LancerNexus.Protocol.PlacementRequest request,

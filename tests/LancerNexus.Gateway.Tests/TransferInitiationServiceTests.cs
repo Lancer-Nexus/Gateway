@@ -173,6 +173,9 @@ public sealed class TransferInitiationServiceTests
         public TransferPrepareRequest? LastPrepare { get; private set; }
         public TransferAbort? LastAbort { get; private set; }
 
+        public Task<CoordinatorTransferLookupResult> GetTransferAsync(Guid transferId,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<CoordinatorTransferCallResult> PrepareAsync(TransferPrepareRequest request,
             CancellationToken cancellationToken = default)
         {
