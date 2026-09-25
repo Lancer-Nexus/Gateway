@@ -1,6 +1,7 @@
 using LancerNexus.Gateway;
 using LancerNexus.Protocol;
 using MySqlConnector;
+using System.Globalization;
 using System.Net.Sockets;
 using System.Threading.RateLimiting;
 
@@ -60,6 +61,7 @@ builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
 builder.Services.AddTransient<TransferAcceptanceService>();
 builder.Services.AddTransient<TransferSourceFreezeService>();
+builder.Services.AddTransient<TransferSnapshotReadService>();
 builder.Services.AddTransient<TransferSourceReleaseService>();
 builder.Services.AddTransient<TransferStatusService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
@@ -72,6 +74,13 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
     string.IsNullOrWhiteSpace(gatewayConnectionString)
         ? new AccountRepositoryNotConfigured()
         : new MySqlAccountRepository(gatewayConnectionString));
+builder.Services.AddSingleton<TransferSnapshotProtection>();
+builder.Services.AddSingleton<ITransferSnapshotStore>(services =>
+    string.IsNullOrWhiteSpace(gatewayConnectionString)
+        ? new TransferSnapshotStoreNotConfigured()
+        : new MySqlTransferSnapshotStore(gatewayConnectionString,
+            services.GetRequiredService<TransferSnapshotProtection>(),
+            services.GetRequiredService<TimeProvider>()));
 builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 builder.Services.AddHttpClient<ICoordinatorTransferClient, CoordinatorTransferClient>();
@@ -91,7 +100,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_accept_v1", "transfer_release_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -273,6 +282,8 @@ app.MapPost("/api/v1/game/release-transfer", async (
                 Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
             TransferSourceReleaseFailure.CoordinatorInvalidResponse =>
                 Results.StatusCode(StatusCodes.Status502BadGateway),
+            TransferSourceReleaseFailure.SnapshotStoreUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
             _ => Results.Conflict(new { error = result.ReasonCode })
         };
     }
@@ -288,7 +299,29 @@ app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
 {
     if (!gameInstances.TryAuthenticate(context.Request, out var instanceId))
         return Results.Unauthorized();
-    var result = await freeze.MarkFrozenAsync(transferId, instanceId, cancellationToken);
+    if (!string.Equals(context.Request.ContentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase))
+        return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+    if (!long.TryParse(context.Request.Headers["X-Lancer-Nexus-Lease-Version"], NumberStyles.None,
+            CultureInfo.InvariantCulture, out var expectedLeaseVersion) || expectedLeaseVersion < 0)
+        return Results.BadRequest(new { error = "transfer_lease_version_invalid" });
+    context.Response.Headers.CacheControl = "no-store";
+    if (context.Request.ContentLength > TransferSnapshotLimits.MaxBytes)
+        return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    using var snapshot = new MemoryStream();
+    var buffer = new byte[64 * 1024];
+    var total = 0;
+    while (true)
+    {
+        var read = await context.Request.Body.ReadAsync(buffer, cancellationToken);
+        if (read == 0)
+            break;
+        if (total > TransferSnapshotLimits.MaxBytes - read)
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+        await snapshot.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        total += read;
+    }
+    var result = await freeze.MarkFrozenAsync(transferId, instanceId, expectedLeaseVersion,
+        snapshot.ToArray(), cancellationToken);
     if (!result.Accepted)
     {
         app.Logger.LogWarning("Game transfer source freeze rejected: {ReasonCode}.", result.ReasonCode);
@@ -296,12 +329,16 @@ app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
         {
             TransferSourceFreezeFailure.CoordinatorUnavailable =>
                 Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferSourceFreezeFailure.SnapshotStoreUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferSourceFreezeFailure.PersistenceUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
             TransferSourceFreezeFailure.CoordinatorInvalidResponse =>
                 Results.StatusCode(StatusCodes.Status502BadGateway),
             _ => Results.Conflict(new { error = result.ReasonCode })
         };
     }
-    return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceFrozen" });
+    return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceFrozen", snapshotBytes = total });
 }).RequireRateLimiting("transfer");
 
 app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
@@ -323,6 +360,26 @@ app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
             Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
         TransferSourceReleaseFailure.CoordinatorInvalidResponse =>
             Results.StatusCode(StatusCodes.Status502BadGateway),
+        _ => Results.NotFound()
+    };
+}).RequireRateLimiting("transfer");
+
+app.MapGet("/api/v1/game/transfers/{transferId:guid}/snapshot", async (
+    Guid transferId,
+    TransferSnapshotReadService snapshots,
+    GameInstanceKeyAuthenticator gameInstances,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    if (!gameInstances.TryAuthenticate(context.Request, out var instanceId))
+        return Results.Unauthorized();
+    context.Response.Headers.CacheControl = "no-store";
+    var result = await snapshots.ReadForTargetAsync(transferId, instanceId, cancellationToken);
+    if (result.Status == TransferSnapshotStoreStatus.Stored && result.Record is not null)
+        return Results.File(result.Record.Snapshot, "application/octet-stream");
+    return result.Status switch
+    {
+        TransferSnapshotStoreStatus.Unavailable => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
         _ => Results.NotFound()
     };
 }).RequireRateLimiting("transfer");

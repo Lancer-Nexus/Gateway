@@ -8,7 +8,8 @@ public enum TransferSourceReleaseFailure
     None,
     Rejected,
     CoordinatorUnavailable,
-    CoordinatorInvalidResponse
+    CoordinatorInvalidResponse,
+    SnapshotStoreUnavailable
 }
 
 public sealed record TransferSourceReleaseResult(
@@ -19,7 +20,9 @@ public sealed record TransferSourceReleaseResult(
     public bool Accepted => TransferId != Guid.Empty && Failure == TransferSourceReleaseFailure.None;
 }
 
-public sealed class TransferSourceReleaseService(ICoordinatorTransferClient coordinator)
+public sealed class TransferSourceReleaseService(
+    ICoordinatorTransferClient coordinator,
+    ITransferSnapshotStore snapshots)
 {
     public async Task<TransferSourceReleaseResult> ReleaseAsync(
         TransferSourceReleaseRequest request,
@@ -42,7 +45,7 @@ public sealed class TransferSourceReleaseService(ICoordinatorTransferClient coor
         if (!string.Equals(transfer.Request.SourceInstanceId, authenticatedSourceInstanceId, StringComparison.Ordinal))
             return Reject(request.TransferId, "transfer_source_instance_mismatch");
         if (transfer.State == TransferState.SourceReleased)
-            return new TransferSourceReleaseResult(request.TransferId, TransferSourceReleaseFailure.None, "duplicate");
+            return await DeleteSnapshotAsync(request.TransferId, duplicate: true, cancellationToken);
         if (transfer.State != TransferState.Committed || transfer.LeaseVersion <= 0)
             return Reject(request.TransferId, "transfer_not_committed");
 
@@ -54,8 +57,17 @@ public sealed class TransferSourceReleaseService(ICoordinatorTransferClient coor
             result.Outcome.State != TransferState.SourceReleased)
             return Fail(request.TransferId, TransferSourceReleaseFailure.CoordinatorInvalidResponse,
                 "coordinator_source_release_rejected");
-        return new TransferSourceReleaseResult(request.TransferId, TransferSourceReleaseFailure.None,
-            result.Outcome.Duplicate ? "duplicate" : "released");
+        return await DeleteSnapshotAsync(request.TransferId, result.Outcome.Duplicate, cancellationToken);
+    }
+
+    private async Task<TransferSourceReleaseResult> DeleteSnapshotAsync(Guid transferId, bool duplicate,
+        CancellationToken cancellationToken)
+    {
+        if (!await snapshots.DeleteAsync(transferId, cancellationToken))
+            return Fail(transferId, TransferSourceReleaseFailure.SnapshotStoreUnavailable,
+                "transfer_snapshot_cleanup_unavailable");
+        return new TransferSourceReleaseResult(transferId, TransferSourceReleaseFailure.None,
+            duplicate ? "duplicate" : "released");
     }
 
     private static TransferSourceReleaseResult Reject(Guid id, string reason) =>

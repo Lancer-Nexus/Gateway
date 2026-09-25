@@ -26,6 +26,9 @@ public interface IAccountRepository
         CancellationToken cancellationToken = default);
     Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId, long characterId,
         DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<CharacterLeaseRecord?> FindActiveCharacterLeaseForTransferAsync(Guid sessionId, long characterId,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        Task.FromResult<CharacterLeaseRecord?>(null);
     Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
         long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
         byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
@@ -59,6 +62,10 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
+    public Task<CharacterLeaseRecord?> FindActiveCharacterLeaseForTransferAsync(Guid sessionId, long characterId,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
     public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
         long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
         byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
@@ -68,6 +75,34 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
 
 public sealed class MySqlAccountRepository(string connectionString) : IAccountRepository
 {
+    public async Task<CharacterLeaseRecord?> FindActiveCharacterLeaseForTransferAsync(Guid sessionId, long characterId,
+        DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (sessionId == Guid.Empty || characterId <= 0)
+            return null;
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT l.instance_id, l.lease_version, l.valid_until_utc
+            FROM character_leases l
+            INNER JOIN gateway_sessions s ON s.session_id = l.session_id
+            INNER JOIN accounts a ON a.account_id = s.account_id
+            INNER JOIN characters c ON c.character_id = l.character_id AND c.account_id = a.account_id
+            WHERE l.session_id = @session_id AND l.character_id = @character_id
+              AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc
+              AND a.status = 'active' AND l.valid_until_utc > @now_utc
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("@session_id", sessionId.ToString());
+        command.Parameters.AddWithValue("@character_id", characterId);
+        command.Parameters.AddWithValue("@now_utc", nowUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        return new CharacterLeaseRecord(reader.GetString(0), reader.GetInt64(1), reader.GetDateTime(2));
+    }
+
     public async Task<AccountRecord?> FindByEmailAsync(
         string email,
         CancellationToken cancellationToken = default)

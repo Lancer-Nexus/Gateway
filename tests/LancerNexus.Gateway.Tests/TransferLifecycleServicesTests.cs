@@ -29,7 +29,8 @@ public sealed class TransferLifecycleServicesTests
     public async Task SourceReleaseRequiresCommittedLeaseAndIsIdempotent()
     {
         var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
-        var release = new TransferSourceReleaseService(coordinator);
+        var snapshots = new FakeSnapshotStore();
+        var release = new TransferSourceReleaseService(coordinator, snapshots);
 
         var early = await release.ReleaseAsync(new TransferSourceReleaseRequest
         { TransferId = coordinator.TransferId }, "li01-instance");
@@ -50,6 +51,24 @@ public sealed class TransferLifecycleServicesTests
         Assert.Equal("duplicate", duplicate.ReasonCode);
         Assert.False(wrongSource.Accepted);
         Assert.Equal(1, coordinator.SourceReleaseCalls);
+        Assert.Equal(2, snapshots.DeleteCalls);
+    }
+
+    private sealed class FakeSnapshotStore : ITransferSnapshotStore
+    {
+        public int DeleteCalls { get; private set; }
+
+        public Task<TransferSnapshotStoreResult> StoreAsync(TransferSnapshotMetadata metadata,
+            ReadOnlyMemory<byte> snapshot, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<TransferSnapshotStoreResult> ReadAsync(Guid transferId,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<bool> DeleteAsync(Guid transferId, CancellationToken cancellationToken = default)
+        {
+            DeleteCalls++;
+            return Task.FromResult(true);
+        }
     }
 
     private sealed class FakeCoordinator(TransferState state, long leaseVersion) : ICoordinatorTransferClient
