@@ -8,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 var loginRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:LoginRateLimitPerMinute", 10);
 var placementRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:PlacementRateLimitPerMinute", 30);
+var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -29,6 +30,15 @@ builder.Services.AddRateLimiter(options =>
             QueueLimit = 0,
             AutoReplenishment = true
         }));
+    options.AddPolicy("transfer", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = transferRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
 });
 var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(coordinatorOptions);
@@ -44,6 +54,7 @@ builder.Services.AddSingleton<JoinTicketReplayStore>();
 var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(transferTicketOptions);
 builder.Services.AddSingleton<TransferTicketCodec>();
+builder.Services.AddTransient<TransferInitiationService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -56,7 +67,7 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
         : new MySqlAccountRepository(gatewayConnectionString));
 builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
-builder.Services.AddHttpClient<CoordinatorTransferClient>();
+builder.Services.AddHttpClient<ICoordinatorTransferClient, CoordinatorTransferClient>();
 
 var app = builder.Build();
 await LogStartupDiagnosticsAsync(app, gatewayConnectionString, coordinatorOptions, sessionTokenOptions);
@@ -73,7 +84,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -285,6 +296,42 @@ async Task<IResult> HandlePlacement(
 
 app.MapPost("/api/v1/placement/request", HandlePlacement).RequireRateLimiting("placement");
 app.MapPost("/api/v1/placement", HandlePlacement).RequireRateLimiting("placement");
+
+app.MapPost("/api/v1/transfers/start", async (
+    TransferStartRequest request,
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    TransferInitiationService transfers,
+    CancellationToken cancellationToken) =>
+{
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization, sessionTokens, DateTime.UtcNow);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+
+    try
+    {
+        var result = await transfers.StartAsync(request, authorization.Claims!, cancellationToken);
+        return result.Failure switch
+        {
+            TransferInitiationFailure.None => Results.Ok(result.Response),
+            TransferInitiationFailure.InvalidRequest => Results.BadRequest(new { error = result.ReasonCode }),
+            TransferInitiationFailure.SessionMismatch => Results.Unauthorized(),
+            TransferInitiationFailure.ActiveLeaseUnavailable => Results.Conflict(new { error = result.ReasonCode }),
+            TransferInitiationFailure.TicketSigningUnavailable => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferInitiationFailure.CoordinatorUnavailable => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferInitiationFailure.CoordinatorInvalidResponse => Results.StatusCode(StatusCodes.Status502BadGateway),
+            TransferInitiationFailure.TargetRejected => Results.Conflict(new { error = result.ReasonCode }),
+            _ => Results.StatusCode(StatusCodes.Status500InternalServerError)
+        };
+    }
+    catch (Exception exception) when (exception is MySqlException or SocketException or IOException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("transfer");
 
 app.Run();
 

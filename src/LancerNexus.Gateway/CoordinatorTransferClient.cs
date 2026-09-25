@@ -29,7 +29,24 @@ public sealed record CoordinatorTransferStateResult(
 
 public sealed record CoordinatorTransferOutcome(bool Accepted, string ReasonCode, TransferState State, bool Duplicate);
 
+public interface ICoordinatorTransferClient
+{
+    Task<CoordinatorTransferCallResult> PrepareAsync(TransferPrepareRequest request,
+        CancellationToken cancellationToken = default);
+    Task<CoordinatorTransferStateResult> MarkSourceFrozenAsync(Guid transferId,
+        CancellationToken cancellationToken = default);
+    Task<CoordinatorTransferStateResult> MarkTargetAcceptedAsync(Guid transferId,
+        CancellationToken cancellationToken = default);
+    Task<CoordinatorTransferStateResult> CommitAsync(Guid transferId, long leaseVersion,
+        CancellationToken cancellationToken = default);
+    Task<CoordinatorTransferStateResult> MarkSourceReleasedAsync(Guid transferId,
+        CancellationToken cancellationToken = default);
+    Task<CoordinatorTransferStateResult> AbortAsync(TransferAbort request,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed class CoordinatorTransferClient(HttpClient httpClient, CoordinatorGatewayOptions options)
+    : ICoordinatorTransferClient
 {
     public Task<CoordinatorTransferCallResult> PrepareAsync(
         TransferPrepareRequest request,
