@@ -15,7 +15,7 @@ public sealed class JoinTicketReplayStore(IConfiguration configuration) : ITrans
         TryConsumeAsync("lancer-nexus:join-ticket:", nonce, expiresUtc, cancellationToken);
 
     public Task<bool> TryConsumeTransferAsync(string nonce, DateTime expiresUtc, CancellationToken cancellationToken) =>
-        TryConsumeAsync("lancer-nexus:transfer-ticket:", nonce, expiresUtc, cancellationToken);
+        TryConsumeAsync("lancer-nexus:transfer-ticket:", nonce, expiresUtc.AddHours(24), cancellationToken);
 
     private async Task<bool> TryConsumeAsync(string keyPrefix, string nonce, DateTime expiresUtc, CancellationToken cancellationToken)
     {

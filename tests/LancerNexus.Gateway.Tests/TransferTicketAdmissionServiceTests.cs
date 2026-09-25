@@ -49,13 +49,26 @@ public sealed class TransferTicketAdmissionServiceTests
         Assert.Equal(2, f.Replay.ConsumeCalls);
     }
 
+    [Fact]
+    public async Task Verify_RecoversAnExpiredTicketOnlyForAnAlreadyFrozenTransfer()
+    {
+        var f = new Fixture(DateTime.UtcNow, TransferState.SourceFrozen, expiredTicket: true);
+
+        var accepted = await f.VerifyAsync();
+        var replayed = await f.VerifyAsync();
+
+        Assert.True(accepted.Accepted);
+        Assert.False(replayed.Accepted);
+        Assert.Equal("transfer_ticket_replayed", replayed.ReasonCode);
+    }
+
     private sealed class Fixture
     {
         private readonly TransferTicketClaims claims;
         private readonly TransferTicketCodec codec = new(new TransferTicketOptions(
             new string('t', 32), "gateway-transfer-01", "game-server-transfer"));
 
-        public Fixture(DateTime now, TransferState state)
+        public Fixture(DateTime now, TransferState state, bool expiredTicket = false)
         {
             claims = new TransferTicketClaims
             {
@@ -89,7 +102,7 @@ public sealed class TransferTicketAdmissionServiceTests
                 claims.TransferId, request, state, claims.ExpiresAtUtc, claims.LeaseVersion));
             Replay = new StubReplayStore();
             Service = new TransferTicketAdmissionService(codec, Coordinator, Replay,
-                new FixedTimeProvider(now.AddSeconds(1)));
+                new FixedTimeProvider(now.AddSeconds(expiredTicket ? 180 : 1)));
         }
 
         public string Ticket { get; }

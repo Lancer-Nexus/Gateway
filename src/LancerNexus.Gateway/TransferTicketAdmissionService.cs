@@ -34,7 +34,7 @@ public sealed class TransferTicketAdmissionService(
         if (string.IsNullOrWhiteSpace(request.Ticket) || string.IsNullOrWhiteSpace(request.TargetInstanceId))
             return Reject("transfer_ticket_request_invalid");
 
-        var validation = tickets.Validate(request.Ticket, timeProvider.GetUtcNow().UtcDateTime);
+        var validation = tickets.ValidateForTransferRecovery(request.Ticket, timeProvider.GetUtcNow().UtcDateTime);
         if (!validation.Accepted)
             return Reject(validation.ReasonCode);
         var claims = validation.Claims!;
@@ -58,8 +58,7 @@ public sealed class TransferTicketAdmissionService(
                            transfer.ExpiresUtc == claims.ExpiresAtUtc && transfer.Request.ExpiresUtc == claims.ExpiresAtUtc;
         if (!detailsMatch)
             return Reject("transfer_ticket_claims_mismatch");
-        if (transfer.ExpiresUtc <= timeProvider.GetUtcNow().UtcDateTime ||
-            transfer.State != TransferState.SourceFrozen)
+        if (transfer.State != TransferState.SourceFrozen)
             return Reject("transfer_not_ready");
 
         try

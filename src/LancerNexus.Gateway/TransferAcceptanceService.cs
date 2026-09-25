@@ -41,7 +41,7 @@ public sealed class TransferAcceptanceService(
             return Reject(Guid.Empty, "target_lease_token_invalid");
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var validation = tickets.Validate(request.Ticket, now);
+        var validation = tickets.ValidateForTransferRecovery(request.Ticket, now);
         if (!validation.Accepted)
             return Reject(Guid.Empty, validation.ReasonCode);
         var claims = validation.Claims!;
@@ -58,8 +58,7 @@ public sealed class TransferAcceptanceService(
                 ? Reject(claims.TransferId, "transfer_not_found")
                 : Fail(claims.TransferId, TransferAcceptanceFailure.CoordinatorInvalidResponse,
                     "coordinator_transfer_mismatch");
-        if (transfer.ExpiresUtc <= now ||
-            transfer.State is not (TransferState.SourceFrozen or TransferState.TargetAccepted or TransferState.Committed))
+        if (transfer.State is not (TransferState.SourceFrozen or TransferState.TargetAccepted or TransferState.Committed))
             return Reject(claims.TransferId, "transfer_not_ready");
         if (transfer.State == TransferState.Committed && transfer.LeaseVersion != claims.LeaseVersion + 1)
             return Reject(claims.TransferId, "transfer_lease_version_mismatch");

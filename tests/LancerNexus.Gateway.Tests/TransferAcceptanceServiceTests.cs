@@ -52,6 +52,18 @@ public sealed class TransferAcceptanceServiceTests
         Assert.Equal(TransferState.Committed, fixture.Coordinator.State);
     }
 
+    [Fact]
+    public async Task Accept_AllowsAuthenticatedRecoveryAfterTicketExpiryOnceTransferWasFrozen()
+    {
+        var fixture = new Fixture(expiredTicket: true, initialState: TransferState.TargetAccepted);
+
+        var result = await fixture.AcceptAsync();
+
+        Assert.True(result.Accepted);
+        Assert.Equal(15, result.LeaseVersion);
+        Assert.Equal(TransferState.Committed, fixture.Coordinator.State);
+    }
+
     private sealed class Fixture
     {
         private readonly DateTime now = new(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
@@ -61,7 +73,7 @@ public sealed class TransferAcceptanceServiceTests
         private readonly TransferTargetAcceptanceRequest request;
         private readonly CoordinatorTransferSnapshot snapshot;
 
-        public Fixture()
+        public Fixture(bool expiredTicket = false, TransferState initialState = TransferState.SourceFrozen)
         {
             var claims = new TransferTicketClaims
             {
@@ -98,13 +110,13 @@ public sealed class TransferAcceptanceServiceTests
                 IdempotencyKey = "acceptance-test"
             };
             snapshot = new CoordinatorTransferSnapshot(claims.TransferId, transferRequest,
-                TransferState.SourceFrozen, claims.ExpiresAtUtc, 0);
+                initialState, claims.ExpiresAtUtc, 0);
             Coordinator = new FakeCoordinator(snapshot);
             Accounts = new FakeAccounts();
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(
                 new Dictionary<string, string?> { ["Gateway:CharacterLeaseLifetimeSeconds"] = "900" }).Build();
             Service = new TransferAcceptanceService(tickets, Coordinator, Accounts,
-                new FixedTimeProvider(now.AddSeconds(1)), configuration);
+                new FixedTimeProvider(now.AddSeconds(expiredTicket ? 180 : 1)), configuration);
         }
 
         public FakeCoordinator Coordinator { get; }

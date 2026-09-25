@@ -37,6 +37,20 @@ public sealed class TransferTicketCodecTests
     }
 
     [Fact]
+    public void ValidateForTransferRecovery_AcceptsExpiredSignatureForLifecycleRecheck()
+    {
+        var issued = DateTime.UtcNow;
+        var codec = CreateCodec();
+        var ticket = codec.Issue(Claims(issued));
+
+        Assert.False(codec.Validate(ticket, issued.AddMinutes(3)).Accepted);
+        var recovery = codec.ValidateForTransferRecovery(ticket, issued.AddMinutes(3));
+
+        Assert.True(recovery.Accepted);
+        Assert.Equal("accepted", recovery.ReasonCode);
+    }
+
+    [Fact]
     public void Issue_RejectsTicketLifetimeOverTwoMinutes()
     {
         var now = DateTime.UtcNow;

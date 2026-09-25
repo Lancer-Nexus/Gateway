@@ -41,6 +41,12 @@ public sealed class TransferTicketCodec(TransferTicketOptions options)
     }
 
     public TransferTicketValidationResult Validate(string ticket, DateTime nowUtc)
+        => Validate(ticket, nowUtc, allowExpired: false);
+
+    public TransferTicketValidationResult ValidateForTransferRecovery(string ticket, DateTime nowUtc)
+        => Validate(ticket, nowUtc, allowExpired: true);
+
+    private TransferTicketValidationResult Validate(string ticket, DateTime nowUtc, bool allowExpired)
     {
         if (!options.IsConfigured)
             return new TransferTicketValidationResult(false, null, "transfer_ticket_signing_not_configured");
@@ -57,7 +63,7 @@ public sealed class TransferTicketCodec(TransferTicketOptions options)
             var claims = JsonSerializer.Deserialize<TransferTicketClaims>(Base64UrlDecode(parts[1]), JsonOptions);
             if (claims is null || !string.Equals(claims.KeyId, options.KeyId, StringComparison.Ordinal))
                 return new TransferTicketValidationResult(false, null, "transfer_ticket_claims_invalid");
-            ValidateClaims(claims, nowUtc, ClockSkew);
+            ValidateClaims(claims, nowUtc, ClockSkew, allowExpired);
             return new TransferTicketValidationResult(true, claims, "accepted");
         }
         catch (Exception exception) when (exception is FormatException or JsonException or ArgumentException)
@@ -66,7 +72,8 @@ public sealed class TransferTicketCodec(TransferTicketOptions options)
         }
     }
 
-    private void ValidateClaims(TransferTicketClaims claims, DateTime nowUtc, TimeSpan allowedClockSkew)
+    private void ValidateClaims(TransferTicketClaims claims, DateTime nowUtc, TimeSpan allowedClockSkew,
+        bool allowExpired = false)
     {
         if (claims.TransferId == Guid.Empty || claims.SessionId == Guid.Empty || claims.AccountId == Guid.Empty ||
             claims.CharacterId <= 0 || claims.LeaseVersion < 0 ||
@@ -79,7 +86,7 @@ public sealed class TransferTicketCodec(TransferTicketOptions options)
             claims.ExpiresAtUtc <= claims.IssuedAtUtc ||
             claims.ExpiresAtUtc - claims.IssuedAtUtc > MaximumLifetime ||
             claims.IssuedAtUtc > nowUtc + allowedClockSkew ||
-            claims.ExpiresAtUtc < nowUtc - allowedClockSkew)
+            (!allowExpired && claims.ExpiresAtUtc < nowUtc - allowedClockSkew))
             throw new ArgumentException("Transfer ticket claims are invalid.", nameof(claims));
     }
 
