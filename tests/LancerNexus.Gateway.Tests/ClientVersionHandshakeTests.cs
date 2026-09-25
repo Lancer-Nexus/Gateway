@@ -18,8 +18,12 @@ public sealed class ClientVersionHandshakeTests
         Assert.Throws<ArgumentException>(() => handshake.Evaluate(Hello("")));
         Assert.Throws<ArgumentException>(() => handshake.Evaluate(new ClientVersionHello
         {
-            ClientVersion = "1.0.2", BuildId = "20260923.1", ProtocolVersion = 1,
-            Platform = "linux-x64", Channel = "stable", DataManifestId = "",
+            ClientVersion = "1.0.2",
+            BuildId = "20260923.1",
+            ProtocolVersion = 1,
+            Platform = "linux-x64",
+            Channel = "stable",
+            DataManifestId = "",
             Capabilities = ["transfer-v1"]
         }));
     }
@@ -73,11 +77,15 @@ public sealed class ClientVersionHandshakeTests
 
     private static ClientVersionHello Hello(string version, int protocolVersion = 1,
         string dataManifestId = "data-2026-09-22") => new()
-    {
-        ClientVersion = version, BuildId = "20260923.1", ProtocolVersion = protocolVersion,
-        DataManifestId = dataManifestId, Platform = "linux-x64", Channel = "stable",
-        Capabilities = ["transfer-v1"]
-    };
+        {
+            ClientVersion = version,
+            BuildId = "20260923.1",
+            ProtocolVersion = protocolVersion,
+            DataManifestId = dataManifestId,
+            Platform = "linux-x64",
+            Channel = "stable",
+            Capabilities = ["transfer-v1"]
+        };
 
     private sealed class MutableClock(DateTimeOffset now) : TimeProvider
     {
