@@ -59,6 +59,7 @@ builder.Services.AddTransient<TransferInitiationService>();
 builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
 builder.Services.AddTransient<TransferAcceptanceService>();
+builder.Services.AddTransient<TransferSourceFreezeService>();
 builder.Services.AddTransient<TransferSourceReleaseService>();
 builder.Services.AddTransient<TransferStatusService>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
@@ -90,7 +91,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_accept_v1", "transfer_release_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_accept_v1", "transfer_release_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -276,6 +277,31 @@ app.MapPost("/api/v1/game/release-transfer", async (
         };
     }
     return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceReleased" });
+}).RequireRateLimiting("transfer");
+
+app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
+    Guid transferId,
+    TransferSourceFreezeService freeze,
+    GameInstanceKeyAuthenticator gameInstances,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    if (!gameInstances.TryAuthenticate(context.Request, out var instanceId))
+        return Results.Unauthorized();
+    var result = await freeze.MarkFrozenAsync(transferId, instanceId, cancellationToken);
+    if (!result.Accepted)
+    {
+        app.Logger.LogWarning("Game transfer source freeze rejected: {ReasonCode}.", result.ReasonCode);
+        return result.Failure switch
+        {
+            TransferSourceFreezeFailure.CoordinatorUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferSourceFreezeFailure.CoordinatorInvalidResponse =>
+                Results.StatusCode(StatusCodes.Status502BadGateway),
+            _ => Results.Conflict(new { error = result.ReasonCode })
+        };
+    }
+    return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceFrozen" });
 }).RequireRateLimiting("transfer");
 
 app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
