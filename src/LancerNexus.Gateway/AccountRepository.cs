@@ -10,6 +10,8 @@ public sealed record AccountRecord(
 
 public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
 public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
+public sealed record CharacterLeaseRecord(string InstanceId, long LeaseVersion, DateTime ValidUntilUtc);
+public sealed record CharacterLeaseTransferResult(bool Accepted, string ReasonCode, long? LeaseVersion);
 
 public interface IAccountRepository
 {
@@ -21,6 +23,12 @@ public interface IAccountRepository
     Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default);
     Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
+        CancellationToken cancellationToken = default);
+    Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId, long characterId,
+        DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+        long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
+        byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default);
 }
 
@@ -44,6 +52,16 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
     public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId,
+        long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+        long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
+        byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
@@ -197,6 +215,169 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         if (!await reader.ReadAsync(cancellationToken))
             return null;
         return new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2));
+    }
+
+    public async Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(
+        Guid accountId, Guid sessionId, long characterId, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (accountId == Guid.Empty || sessionId == Guid.Empty || characterId <= 0)
+            return null;
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT l.instance_id, l.lease_version, l.valid_until_utc
+            FROM character_leases l
+            INNER JOIN characters c ON c.character_id = l.character_id
+            INNER JOIN gateway_sessions s ON s.session_id = l.session_id
+            INNER JOIN accounts a ON a.account_id = s.account_id
+            WHERE c.character_id = @character_id AND c.account_id = @account_id
+              AND s.session_id = @session_id AND s.account_id = @account_id
+              AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc
+              AND a.status = 'active' AND l.valid_until_utc > @now_utc
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("@character_id", characterId);
+        command.Parameters.AddWithValue("@account_id", accountId.ToString());
+        command.Parameters.AddWithValue("@session_id", sessionId.ToString());
+        command.Parameters.AddWithValue("@now_utc", nowUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+            return null;
+        return new CharacterLeaseRecord(reader.GetString(0), reader.GetInt64(1), reader.GetDateTime(2));
+    }
+
+    public async Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(
+        Guid transferId, Guid sessionId, long characterId, string sourceInstanceId, string targetInstanceId,
+        long expectedLeaseVersion, byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (transferId == Guid.Empty || sessionId == Guid.Empty || characterId <= 0 ||
+            expectedLeaseVersion < 0 || expectedLeaseVersion == long.MaxValue ||
+            string.IsNullOrWhiteSpace(sourceInstanceId) ||
+            string.IsNullOrWhiteSpace(targetInstanceId) ||
+            string.Equals(sourceInstanceId, targetInstanceId, StringComparison.Ordinal) ||
+            targetLeaseTokenHash.Length != 32 || validUntilUtc <= nowUtc)
+            return new CharacterLeaseTransferResult(false, "invalid_transfer", null);
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // Serialize all transfers of this character, including duplicate retries.
+        await using (var characterLock = connection.CreateCommand())
+        {
+            characterLock.Transaction = transaction;
+            characterLock.CommandText = "SELECT character_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
+            characterLock.Parameters.AddWithValue("@character_id", characterId);
+            if (await characterLock.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new CharacterLeaseTransferResult(false, "character_not_found", null);
+            }
+        }
+
+        await using (var duplicate = connection.CreateCommand())
+        {
+            duplicate.Transaction = transaction;
+            duplicate.CommandText = """
+                SELECT session_id, character_id, source_instance_id, target_instance_id,
+                       expected_lease_version, committed_lease_version, target_lease_token_hash
+                FROM character_lease_transfers WHERE transfer_id = @transfer_id;
+                """;
+            duplicate.Parameters.AddWithValue("@transfer_id", transferId.ToString());
+            await using var reader = await duplicate.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var matches = reader.GetString(0) == sessionId.ToString() && reader.GetInt64(1) == characterId &&
+                    reader.GetString(2) == sourceInstanceId && reader.GetString(3) == targetInstanceId &&
+                    reader.GetInt64(4) == expectedLeaseVersion &&
+                    System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                        (byte[])reader.GetValue(6), targetLeaseTokenHash);
+                var committedVersion = reader.GetInt64(5);
+                await reader.DisposeAsync();
+                await transaction.RollbackAsync(cancellationToken);
+                return matches
+                    ? new CharacterLeaseTransferResult(true, "duplicate", committedVersion)
+                    : new CharacterLeaseTransferResult(false, "transfer_id_conflict", null);
+            }
+        }
+
+        await using (var sessionCheck = connection.CreateCommand())
+        {
+            sessionCheck.Transaction = transaction;
+            sessionCheck.CommandText = """
+                SELECT 1 FROM gateway_sessions s
+                INNER JOIN accounts a ON a.account_id = s.account_id
+                INNER JOIN characters c ON c.account_id = a.account_id
+                WHERE s.session_id = @session_id AND c.character_id = @character_id
+                  AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc AND a.status = 'active';
+                """;
+            sessionCheck.Parameters.AddWithValue("@session_id", sessionId.ToString());
+            sessionCheck.Parameters.AddWithValue("@character_id", characterId);
+            sessionCheck.Parameters.AddWithValue("@now_utc", nowUtc);
+            if (await sessionCheck.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new CharacterLeaseTransferResult(false, "session_or_character_invalid", null);
+            }
+        }
+
+        var nextVersion = checked(expectedLeaseVersion + 1);
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE character_leases
+                SET session_id = @session_id, instance_id = @target_instance_id,
+                    lease_token_hash = @lease_token_hash, lease_version = @next_version,
+                    valid_until_utc = @valid_until_utc
+                WHERE character_id = @character_id AND session_id = @session_id
+                  AND instance_id = @source_instance_id AND lease_version = @expected_version
+                  AND valid_until_utc > @now_utc;
+                """;
+            update.Parameters.AddWithValue("@session_id", sessionId.ToString());
+            update.Parameters.AddWithValue("@target_instance_id", targetInstanceId);
+            update.Parameters.AddWithValue("@lease_token_hash", targetLeaseTokenHash);
+            update.Parameters.AddWithValue("@next_version", nextVersion);
+            update.Parameters.AddWithValue("@valid_until_utc", validUntilUtc);
+            update.Parameters.AddWithValue("@character_id", characterId);
+            update.Parameters.AddWithValue("@source_instance_id", sourceInstanceId);
+            update.Parameters.AddWithValue("@expected_version", expectedLeaseVersion);
+            update.Parameters.AddWithValue("@now_utc", nowUtc);
+            if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new CharacterLeaseTransferResult(false, "lease_fence_rejected", null);
+            }
+        }
+
+        await using (var record = connection.CreateCommand())
+        {
+            record.Transaction = transaction;
+            record.CommandText = """
+                INSERT INTO character_lease_transfers
+                    (transfer_id, session_id, character_id, source_instance_id, target_instance_id,
+                     expected_lease_version, committed_lease_version, target_lease_token_hash, committed_at_utc)
+                VALUES (@transfer_id, @session_id, @character_id, @source_instance_id, @target_instance_id,
+                        @expected_version, @next_version, @lease_token_hash, @now_utc);
+                """;
+            record.Parameters.AddWithValue("@transfer_id", transferId.ToString());
+            record.Parameters.AddWithValue("@session_id", sessionId.ToString());
+            record.Parameters.AddWithValue("@character_id", characterId);
+            record.Parameters.AddWithValue("@source_instance_id", sourceInstanceId);
+            record.Parameters.AddWithValue("@target_instance_id", targetInstanceId);
+            record.Parameters.AddWithValue("@expected_version", expectedLeaseVersion);
+            record.Parameters.AddWithValue("@next_version", nextVersion);
+            record.Parameters.AddWithValue("@lease_token_hash", targetLeaseTokenHash);
+            record.Parameters.AddWithValue("@now_utc", nowUtc);
+            await record.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new CharacterLeaseTransferResult(true, "committed", nextVersion);
     }
 }
 

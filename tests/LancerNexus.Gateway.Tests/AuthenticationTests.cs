@@ -103,6 +103,16 @@ public sealed class AuthenticationTests
         public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<CharacterRecord?>(null);
+
+        public Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId,
+            long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+            Task.FromResult<CharacterLeaseRecord?>(null);
+
+        public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+            long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
+            byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class FixedTimeProvider(DateTime value) : TimeProvider

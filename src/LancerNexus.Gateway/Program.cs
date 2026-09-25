@@ -41,6 +41,9 @@ var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuratio
 builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<JoinTicketReplayStore>();
+var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(transferTicketOptions);
+builder.Services.AddSingleton<TransferTicketCodec>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -53,6 +56,7 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
         : new MySqlAccountRepository(gatewayConnectionString));
 builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
+builder.Services.AddHttpClient<CoordinatorTransferClient>();
 
 var app = builder.Build();
 await LogStartupDiagnosticsAsync(app, gatewayConnectionString, coordinatorOptions, sessionTokenOptions);
