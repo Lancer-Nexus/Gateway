@@ -23,6 +23,7 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Do not make placement decisions independently of the Coordinator except during an explicitly documented degraded mode.
 - Keep public HTTP endpoints separate from internal QUIC/service endpoints.
 - Rate-limit login and transfer operations.
+- Expire idle sessions using the configured idle timeout, cap them at the absolute lifetime, and revoke expired database sessions so stale character leases cannot remain active.
 
 ## Working-model escalation
 

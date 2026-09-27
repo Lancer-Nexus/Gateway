@@ -9,7 +9,8 @@ public sealed record CoordinatorTransferEnvelope(
     TransferPrepared Decision,
     TransferState State,
     string? TargetEndpoint,
-    bool Duplicate);
+    bool Duplicate,
+    string? TargetInstanceId = null);
 
 public sealed record CoordinatorTransferCallResult(
     HttpStatusCode? StatusCode,
@@ -72,12 +73,18 @@ public sealed class CoordinatorTransferClient(HttpClient httpClient, Coordinator
             return new(response.StatusCode, null, null);
         if (!response.IsSuccessStatusCode)
             return new(response.StatusCode, null, "coordinator_lookup_rejected");
-        var transfer = await response.Content.ReadFromJsonAsync<CoordinatorTransferSnapshot>(cancellationToken);
+        var transfer = await response.Content.ReadFromJsonAsync<CoordinatorTransferWireSnapshot>(cancellationToken);
         if (transfer is null || transfer.TransferId != transferId || transfer.Request is null ||
             transfer.Request.TransferId != transferId)
             return new(response.StatusCode, null, "coordinator_invalid_response");
-        return new(response.StatusCode, transfer, null);
+        // Coordinator stores the deadline as DateTimeOffset. Reading its +00:00 JSON
+        // directly into DateTime produces Local kind, even though it represents UTC.
+        return new(response.StatusCode, new CoordinatorTransferSnapshot(transfer.TransferId,
+            transfer.Request, transfer.State, transfer.ExpiresUtc.UtcDateTime, transfer.LeaseVersion), null);
     }
+
+    private sealed record CoordinatorTransferWireSnapshot(Guid TransferId, TransferPrepareRequest Request,
+        TransferState State, DateTimeOffset ExpiresUtc, long LeaseVersion);
 
     public Task<CoordinatorTransferCallResult> PrepareAsync(
         TransferPrepareRequest request,

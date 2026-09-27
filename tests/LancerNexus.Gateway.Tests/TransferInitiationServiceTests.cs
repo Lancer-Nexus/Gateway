@@ -35,6 +35,27 @@ public sealed class TransferInitiationServiceTests
     }
 
     [Fact]
+    public async Task Start_UsesCoordinatorResolvedTargetWhenInstanceIsUnspecified()
+    {
+        var now = DateTime.UtcNow;
+        var request = Request(now, targetInstanceId: "");
+        var session = Session(request.SessionId);
+        var options = TicketOptions();
+        var coordinator = new StubCoordinatorTransferClient(accepted: true);
+        var service = CreateService(
+            new StubAccountRepository(new CharacterLeaseRecord("li01-instance", 14, now.AddMinutes(4))),
+            coordinator, options, now);
+
+        var result = await service.StartAsync(request, session);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("", coordinator.LastPrepare!.TargetInstanceId);
+        Assert.Equal("li02-instance", result.Response!.TargetInstanceId);
+        var ticket = new TransferTicketCodec(options).Validate(result.Response.Prepared.TransferTicket!, now.AddSeconds(1));
+        Assert.Equal("li02-instance", ticket.Claims!.TargetInstanceId);
+    }
+
+    [Fact]
     public async Task Start_RejectsMissingSourceLeaseWithoutCallingCoordinator()
     {
         var now = DateTime.UtcNow;
@@ -110,12 +131,12 @@ public sealed class TransferInitiationServiceTests
     private static TransferTicketOptions TicketOptions() => new(
         new string('t', 32), "transfer-key", "game-server-transfer");
 
-    private static TransferStartRequest Request(DateTime now) => new()
+    private static TransferStartRequest Request(DateTime now, string targetInstanceId = "li02-instance") => new()
     {
         TransferId = Guid.NewGuid(),
         SessionId = Guid.NewGuid(),
         CharacterId = 73,
-        TargetInstanceId = "li02-instance",
+        TargetInstanceId = targetInstanceId,
         TargetSystemId = "li02",
         ExpiresUtc = now.AddMinutes(1),
         IdempotencyKey = "transfer-73-li02"
@@ -187,7 +208,8 @@ public sealed class TransferInitiationServiceTests
                     Accepted = accepted,
                     ExpiresUtc = request.ExpiresUtc,
                     ReasonCode = accepted ? "prepared" : "target_instance_unavailable"
-                }, TransferState.Prepared, accepted ? "10.0.0.2:2300" : null, false), null));
+                }, TransferState.Prepared, accepted ? "10.0.0.2:2300" : null, false,
+                    accepted ? (string.IsNullOrWhiteSpace(request.TargetInstanceId) ? "li02-instance" : request.TargetInstanceId) : null), null));
         }
 
         public Task<CoordinatorTransferStateResult> MarkSourceFrozenAsync(Guid transferId,

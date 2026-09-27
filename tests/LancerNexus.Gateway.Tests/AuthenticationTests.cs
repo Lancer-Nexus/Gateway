@@ -28,6 +28,8 @@ public sealed class AuthenticationTests
         Assert.True(result.Succeeded);
         Assert.NotNull(repository.CreatedSession);
         Assert.Equal(result.Response!.SessionId, repository.CreatedSession!.Value.SessionId);
+        Assert.Equal(now.AddMinutes(5), repository.CreatedSession.Value.ExpiresAtUtc);
+        Assert.Equal(now.AddMinutes(5), result.Response.ExpiresAtUtc);
         Assert.True(new SessionTokenCodec(options).Validate(result.Response.AccessToken, now).Accepted);
     }
 
@@ -68,19 +70,29 @@ public sealed class AuthenticationTests
             new FixedTimeProvider(now));
 
         var login = await service.LoginAsync(new LoginRequest("pilot@example.net", "secret"));
-        var refresh = await service.RefreshAsync(new RefreshRequest(
+        var refreshService = new GatewayAuthenticationService(
+            repository,
+            new BcryptPasswordVerifier(),
+            new SessionTokenCodec(options),
+            options,
+            new FixedTimeProvider(now.AddMinutes(2)));
+        var refresh = await refreshService.RefreshAsync(new RefreshRequest(
             login.Response!.SessionId,
             login.Response.RefreshToken));
 
         Assert.True(refresh.Succeeded);
         Assert.NotEqual(login.Response.RefreshToken, refresh.Response!.RefreshToken);
-        Assert.True(new SessionTokenCodec(options).Validate(refresh.Response.AccessToken, now).Accepted);
+        Assert.True(new SessionTokenCodec(options).Validate(refresh.Response.AccessToken, now.AddMinutes(2)).Accepted);
         Assert.Equal(refresh.Response.SessionId, login.Response.SessionId);
+        Assert.Equal(now.AddMinutes(7), repository.LastRefreshExpiry);
+        Assert.Equal(now.AddMinutes(7), refresh.Response.ExpiresAtUtc);
+        Assert.Equal(DateTimeKind.Utc, refresh.Response.ExpiresAtUtc.Kind);
     }
 
     private sealed class FakeAccountRepository(AccountRecord? account) : IAccountRepository
     {
-        public (Guid SessionId, Guid AccountId)? CreatedSession { get; private set; }
+        public (Guid SessionId, Guid AccountId, DateTime ExpiresAtUtc)? CreatedSession { get; private set; }
+        public DateTime? LastRefreshExpiry { get; private set; }
 
         public Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default) =>
             Task.FromResult(account);
@@ -88,13 +100,21 @@ public sealed class AuthenticationTests
         public Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
             DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default)
         {
-            CreatedSession = (sessionId, accountId);
+            CreatedSession = (sessionId, accountId, expiresAtUtc);
             return Task.CompletedTask;
         }
 
         public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
             byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
-            Task.FromResult<SessionRecord?>(new(account!.AccountId, nowUtc.AddMinutes(10)));
+            Task.FromResult<SessionRecord?>(new(account!.AccountId, LastRefreshExpiry ?? CreatedSession?.ExpiresAtUtc ?? nowUtc.AddMinutes(10)));
+
+        public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+            byte[] newRefreshTokenHash, TimeSpan maximumLifetime, TimeSpan idleTimeout, DateTime nowUtc,
+            CancellationToken cancellationToken = default)
+        {
+            LastRefreshExpiry = DateTime.SpecifyKind(nowUtc.Add(idleTimeout), DateTimeKind.Unspecified);
+            return Task.FromResult<SessionRecord?>(new(account!.AccountId, LastRefreshExpiry.Value));
+        }
 
         public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
             CancellationToken cancellationToken = default) =>

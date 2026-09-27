@@ -10,6 +10,8 @@ var builder = WebApplication.CreateBuilder(args);
 var loginRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:LoginRateLimitPerMinute", 10);
 var placementRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:PlacementRateLimitPerMinute", 30);
 var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
+var transferStatusRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferStatusRateLimitPerMinute", 120);
+var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:SessionRefreshRateLimitPerMinute", 120);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -18,6 +20,15 @@ builder.Services.AddRateLimiter(options =>
         _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = loginRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("session-refresh", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = sessionRefreshRateLimit,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
             AutoReplenishment = true
@@ -32,10 +43,19 @@ builder.Services.AddRateLimiter(options =>
             AutoReplenishment = true
         }));
     options.AddPolicy("transfer", context => RateLimitPartition.GetFixedWindowLimiter(
-        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        TransferRateLimitPartition.GetKey(context),
         _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = transferRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("transfer-status", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = transferStatusRateLimit,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
             AutoReplenishment = true
@@ -45,6 +65,7 @@ var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Con
 builder.Services.AddSingleton(coordinatorOptions);
 var sessionTokenOptions = SessionTokenOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(sessionTokenOptions);
+builder.Services.AddSingleton(AuthenticationSessionOptions.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton<SessionTokenCodec>();
 builder.Services.AddSingleton(ClientVersionPolicy.FromConfiguration(builder.Configuration));
 builder.Services.AddSingleton<ClientVersionHandshake>();
@@ -74,6 +95,8 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
     string.IsNullOrWhiteSpace(gatewayConnectionString)
         ? new AccountRepositoryNotConfigured()
         : new MySqlAccountRepository(gatewayConnectionString));
+if (!string.IsNullOrWhiteSpace(gatewayConnectionString))
+    builder.Services.AddHostedService<ExpiredSessionCleanupService>();
 builder.Services.AddSingleton<TransferSnapshotProtection>();
 builder.Services.AddSingleton<ITransferSnapshotStore>(services =>
     string.IsNullOrWhiteSpace(gatewayConnectionString)
@@ -140,7 +163,7 @@ app.MapPost("/api/v1/auth/refresh", async (
         LoginFailure.InvalidRefreshToken => Results.Unauthorized(),
         _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
     };
-});
+}).RequireRateLimiting("session-refresh");
 
 app.MapGet("/api/v1/me", (HttpContext context, SessionTokenCodec sessionTokens) =>
 {
@@ -290,6 +313,42 @@ app.MapPost("/api/v1/game/release-transfer", async (
     return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceReleased" });
 }).RequireRateLimiting("transfer");
 
+app.MapPost("/api/v1/game/start-transfer", async (
+    TransferStartRequest request,
+    TransferInitiationService transfers,
+    GameInstanceKeyAuthenticator gameInstances,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    if (!gameInstances.TryAuthenticate(context.Request, out var sourceInstanceId))
+        return Results.Unauthorized();
+    TransferInitiationResult result;
+    try
+    {
+        result = await transfers.StartFromInstanceAsync(request, sourceInstanceId, cancellationToken);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+    if (!result.Succeeded)
+    {
+        app.Logger.LogWarning("Game transfer start rejected: {ReasonCode}.", result.ReasonCode);
+        return result.Failure switch
+        {
+            TransferInitiationFailure.CoordinatorUnavailable or TransferInitiationFailure.ActiveLeaseUnavailable or
+                TransferInitiationFailure.TicketSigningUnavailable =>
+                Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+            TransferInitiationFailure.CoordinatorInvalidResponse =>
+                Results.StatusCode(StatusCodes.Status502BadGateway),
+            TransferInitiationFailure.TargetRejected => Results.Conflict(new { error = result.ReasonCode }),
+            _ => Results.BadRequest(new { error = result.ReasonCode })
+        };
+    }
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(result.Response);
+}).RequireRateLimiting("transfer");
+
 app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
     Guid transferId,
     TransferSourceFreezeService freeze,
@@ -362,7 +421,7 @@ app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
             Results.StatusCode(StatusCodes.Status502BadGateway),
         _ => Results.NotFound()
     };
-}).RequireRateLimiting("transfer");
+}).RequireRateLimiting("transfer-status");
 
 app.MapGet("/api/v1/game/transfers/{transferId:guid}/snapshot", async (
     Guid transferId,

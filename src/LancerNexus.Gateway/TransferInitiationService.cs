@@ -35,32 +35,51 @@ public sealed class TransferInitiationService(
         SessionTokenClaims session,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(session);
+        return await StartCoreAsync(request, session.AccountId, session.SessionId, null, cancellationToken);
+    }
+
+    public Task<TransferInitiationResult> StartFromInstanceAsync(
+        TransferStartRequest request, string sourceInstanceId, CancellationToken cancellationToken = default)
+    {
+        if (request.AccountId == Guid.Empty || string.IsNullOrWhiteSpace(sourceInstanceId))
+            return Task.FromResult(Failed(TransferInitiationFailure.InvalidRequest, "invalid_transfer_request"));
+        return StartCoreAsync(request, request.AccountId, request.SessionId, sourceInstanceId, cancellationToken);
+    }
+
+    private async Task<TransferInitiationResult> StartCoreAsync(
+        TransferStartRequest request, Guid accountId, Guid sessionId, string? authenticatedSourceInstanceId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         if (request.TransferId == Guid.Empty || request.SessionId == Guid.Empty || request.CharacterId <= 0 ||
-            string.IsNullOrWhiteSpace(request.TargetInstanceId) || request.TargetInstanceId.Length > 96 ||
+            request.TargetInstanceId is { Length: > 96 } ||
             string.IsNullOrWhiteSpace(request.TargetSystemId) || request.TargetSystemId.Length > 96 ||
             request.GroupId is { Length: > 96 } || string.IsNullOrWhiteSpace(request.IdempotencyKey) ||
             request.IdempotencyKey.Length > 128 || request.ExpiresUtc.Kind != DateTimeKind.Utc ||
             request.ExpiresUtc <= now || request.ExpiresUtc > now.AddMinutes(2))
             return Failed(TransferInitiationFailure.InvalidRequest, "invalid_transfer_request");
-        if (request.SessionId != session.SessionId)
+        if (request.SessionId != sessionId ||
+            (request.AccountId != Guid.Empty && request.AccountId != accountId))
             return Failed(TransferInitiationFailure.SessionMismatch, "session_id_mismatch");
         if (!ticketOptions.IsConfigured)
             return Failed(TransferInitiationFailure.TicketSigningUnavailable, "transfer_ticket_signing_not_configured");
 
         var lease = await accounts.FindActiveCharacterLeaseAsync(
-            session.AccountId, session.SessionId, request.CharacterId, now, cancellationToken);
+            accountId, sessionId, request.CharacterId, now, cancellationToken);
         if (lease is null || lease.LeaseVersion < 0 || lease.ValidUntilUtc <= now ||
             string.IsNullOrWhiteSpace(lease.InstanceId) ||
-            string.Equals(lease.InstanceId, request.TargetInstanceId, StringComparison.Ordinal))
+            (!string.IsNullOrWhiteSpace(request.TargetInstanceId) &&
+             string.Equals(lease.InstanceId, request.TargetInstanceId, StringComparison.Ordinal)) ||
+            (authenticatedSourceInstanceId is not null &&
+             !string.Equals(lease.InstanceId, authenticatedSourceInstanceId, StringComparison.Ordinal)))
             return Failed(TransferInitiationFailure.ActiveLeaseUnavailable, "active_source_lease_unavailable");
 
         var prepare = new TransferPrepareRequest
         {
             TransferId = request.TransferId,
-            SessionId = session.SessionId,
+            SessionId = sessionId,
             CharacterId = request.CharacterId,
             SourceInstanceId = lease.InstanceId,
             TargetInstanceId = request.TargetInstanceId,
@@ -80,6 +99,8 @@ public sealed class TransferInitiationService(
             return Failed(TransferInitiationFailure.TargetRejected, envelope.Decision.ReasonCode);
         if (envelope.State is not (TransferState.Prepared or TransferState.SourceFrozen) ||
             string.IsNullOrWhiteSpace(envelope.TargetEndpoint) ||
+            string.IsNullOrWhiteSpace(envelope.TargetInstanceId) ||
+            string.Equals(envelope.TargetInstanceId, lease.InstanceId, StringComparison.Ordinal) ||
             envelope.Decision.ExpiresUtc.Kind != DateTimeKind.Utc ||
             envelope.Decision.ExpiresUtc <= now || envelope.Decision.ExpiresUtc > now.AddMinutes(2))
         {
@@ -93,10 +114,12 @@ public sealed class TransferInitiationService(
         }
 
         var confirmedLease = await accounts.FindActiveCharacterLeaseAsync(
-            session.AccountId, session.SessionId, request.CharacterId, now, cancellationToken);
+            accountId, sessionId, request.CharacterId, now, cancellationToken);
         if (confirmedLease is null || confirmedLease.ValidUntilUtc <= now ||
             confirmedLease.LeaseVersion != lease.LeaseVersion ||
-            !string.Equals(confirmedLease.InstanceId, lease.InstanceId, StringComparison.Ordinal))
+            !string.Equals(confirmedLease.InstanceId, lease.InstanceId, StringComparison.Ordinal) ||
+            (authenticatedSourceInstanceId is not null &&
+             !string.Equals(confirmedLease.InstanceId, authenticatedSourceInstanceId, StringComparison.Ordinal)))
         {
             _ = await coordinator.AbortAsync(new TransferAbort
             {
@@ -113,11 +136,11 @@ public sealed class TransferInitiationService(
             ticket = transferTickets.Issue(new TransferTicketClaims
             {
                 TransferId = request.TransferId,
-                SessionId = session.SessionId,
-                AccountId = session.AccountId,
+                SessionId = sessionId,
+                AccountId = accountId,
                 CharacterId = request.CharacterId,
                 SourceInstanceId = lease.InstanceId,
-                TargetInstanceId = request.TargetInstanceId,
+                TargetInstanceId = envelope.TargetInstanceId!,
                 TargetSystemId = request.TargetSystemId,
                 LeaseVersion = lease.LeaseVersion,
                 IssuedAtUtc = now,
@@ -145,6 +168,7 @@ public sealed class TransferInitiationService(
             },
             SourceInstanceId = lease.InstanceId,
             TargetEndpoint = envelope.TargetEndpoint,
+            TargetInstanceId = envelope.TargetInstanceId,
             TargetSystemId = request.TargetSystemId,
             LeaseVersion = lease.LeaseVersion,
             Duplicate = envelope.Duplicate

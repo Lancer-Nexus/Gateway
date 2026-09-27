@@ -58,6 +58,25 @@ public sealed class CoordinatorTransferClientTests
         Assert.Equal("Bearer", handler.Authorization!.Scheme);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task Lookup_NormalizesCoordinatorOffsetExpiryToUtc(int offsetHours)
+    {
+        var request = Request();
+        var expiry = new DateTimeOffset(request.ExpiresUtc).ToOffset(TimeSpan.FromHours(offsetHours));
+        using var handler = new CaptureHandler(lookupRequest: request, lookupExpiry: expiry);
+        using var httpClient = new HttpClient(handler);
+
+        var result = await CreateClient(httpClient).GetTransferAsync(request.TransferId);
+
+        Assert.True(result.IsAvailable);
+        Assert.NotNull(result.Transfer);
+        Assert.Equal(DateTimeKind.Utc, result.Transfer.ExpiresUtc.Kind);
+        Assert.Equal(request.ExpiresUtc, result.Transfer.ExpiresUtc);
+        Assert.Equal(result.Transfer.Request.ExpiresUtc, result.Transfer.ExpiresUtc);
+    }
+
     private static CoordinatorTransferClient CreateClient(HttpClient httpClient) => new(
         httpClient,
         new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), new string('k', 32),
@@ -75,7 +94,8 @@ public sealed class CoordinatorTransferClientTests
         IdempotencyKey = "jump-li01-li02-001"
     };
 
-    private sealed class CaptureHandler(Guid? responseTransferId = null, bool stateResponse = false) : HttpMessageHandler
+    private sealed class CaptureHandler(Guid? responseTransferId = null, bool stateResponse = false,
+        TransferPrepareRequest? lookupRequest = null, DateTimeOffset? lookupExpiry = null) : HttpMessageHandler
     {
         public AuthenticationHeaderValue? Authorization { get; private set; }
         public string? Body { get; private set; }
@@ -88,7 +108,18 @@ public sealed class CoordinatorTransferClientTests
             RequestUri = request.RequestUri;
             Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             object payload;
-            if (stateResponse)
+            if (lookupRequest is not null)
+            {
+                payload = new
+                {
+                    lookupRequest.TransferId,
+                    Request = lookupRequest,
+                    State = TransferState.Prepared,
+                    ExpiresUtc = lookupExpiry!.Value,
+                    LeaseVersion = 4
+                };
+            }
+            else if (stateResponse)
             {
                 payload = new CoordinatorTransferOutcome(true, "accepted", TransferState.Committed, false);
             }

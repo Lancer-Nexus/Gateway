@@ -9,6 +9,22 @@ public sealed record LoginRequest(string Email, string Password, string? Handsha
 public sealed record LoginResponse(string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
 public sealed record RefreshRequest(Guid SessionId, string RefreshToken);
 
+public sealed record AuthenticationSessionOptions(TimeSpan Lifetime, TimeSpan? IdleTimeout = null)
+{
+    public TimeSpan EffectiveIdleTimeout => IdleTimeout ?? TimeSpan.FromMinutes(5);
+
+    public static AuthenticationSessionOptions FromConfiguration(IConfiguration configuration)
+    {
+        var lifetimeHours = configuration.GetValue<int?>("Gateway:SessionLifetimeHours") ?? 24;
+        if (lifetimeHours is < 1 or > 720)
+            throw new InvalidOperationException("Gateway:SessionLifetimeHours must be between 1 and 720.");
+        var idleMinutes = configuration.GetValue<int?>("Gateway:SessionIdleTimeoutMinutes") ?? 5;
+        if (idleMinutes is < 1 or > 1440)
+            throw new InvalidOperationException("Gateway:SessionIdleTimeoutMinutes must be between 1 and 1440.");
+        return new AuthenticationSessionOptions(TimeSpan.FromHours(lifetimeHours), TimeSpan.FromMinutes(idleMinutes));
+    }
+}
+
 public enum LoginFailure
 {
     None,
@@ -50,8 +66,11 @@ public sealed class GatewayAuthenticationService(
     IPasswordVerifier passwordVerifier,
     SessionTokenCodec tokenCodec,
     SessionTokenOptions tokenOptions,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    AuthenticationSessionOptions? sessionOptions = null)
 {
+    private TimeSpan SessionLifetime => sessionOptions?.Lifetime ?? TimeSpan.FromHours(24);
+
     public async Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrEmpty(request.Password))
@@ -76,7 +95,8 @@ public sealed class GatewayAuthenticationService(
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var sessionId = Guid.NewGuid();
         var nonce = CreateNonce();
-        var expires = now.Add(tokenOptions.Lifetime);
+        var sessionExpires = now.Add(Min(SessionLifetime, sessionOptions?.EffectiveIdleTimeout ?? TimeSpan.FromMinutes(5)));
+        var accessTokenExpires = Min(sessionExpires, now.Add(tokenOptions.Lifetime));
         try
         {
             var refreshToken = CreateNonce();
@@ -86,7 +106,7 @@ public sealed class GatewayAuthenticationService(
                 SHA256.HashData(Encoding.UTF8.GetBytes(nonce)),
                 SHA256.HashData(Encoding.UTF8.GetBytes(refreshToken)),
                 now,
-                expires,
+                sessionExpires,
                 cancellationToken);
             var token = tokenCodec.Issue(new SessionTokenClaims
             {
@@ -94,11 +114,12 @@ public sealed class GatewayAuthenticationService(
                 AccountId = account.AccountId,
                 Audience = tokenOptions.Audience,
                 IssuedAtUtc = now,
-                ExpiresAtUtc = expires,
+                ExpiresAtUtc = accessTokenExpires,
                 Nonce = nonce,
                 KeyId = tokenOptions.KeyId
             });
-            return new LoginResult(new LoginResponse(token, refreshToken, account.AccountId, sessionId, expires), LoginFailure.None);
+            return new LoginResult(new LoginResponse(token, refreshToken, account.AccountId, sessionId,
+                accessTokenExpires), LoginFailure.None);
         }
         catch (InvalidOperationException)
         {
@@ -122,6 +143,8 @@ public sealed class GatewayAuthenticationService(
                 request.SessionId,
                 SHA256.HashData(Encoding.UTF8.GetBytes(request.RefreshToken)),
                 SHA256.HashData(Encoding.UTF8.GetBytes(newRefreshToken)),
+                SessionLifetime,
+                sessionOptions?.EffectiveIdleTimeout ?? TimeSpan.FromMinutes(5),
                 now,
                 cancellationToken);
         }
@@ -133,8 +156,11 @@ public sealed class GatewayAuthenticationService(
             return new LoginResult(null, LoginFailure.InvalidRefreshToken);
 
         var accessNonce = CreateNonce();
-        var expires = session.ExpiresAtUtc < now.Add(tokenOptions.Lifetime)
-            ? session.ExpiresAtUtc
+        // Database DATETIME values do not carry a timezone. The session store contract
+        // records UTC, so restore that kind before serializing the API response.
+        var sessionExpiresAtUtc = DateTime.SpecifyKind(session.ExpiresAtUtc, DateTimeKind.Utc);
+        var expires = sessionExpiresAtUtc < now.Add(tokenOptions.Lifetime)
+            ? sessionExpiresAtUtc
             : now.Add(tokenOptions.Lifetime);
         var token = tokenCodec.Issue(new SessionTokenClaims
         {
@@ -155,4 +181,7 @@ public sealed class GatewayAuthenticationService(
         RandomNumberGenerator.Fill(bytes);
         return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
+
+    private static TimeSpan Min(TimeSpan left, TimeSpan right) => left <= right ? left : right;
+    private static DateTime Min(DateTime left, DateTime right) => left <= right ? left : right;
 }

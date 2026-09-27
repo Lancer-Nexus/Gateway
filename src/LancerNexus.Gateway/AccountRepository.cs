@@ -20,6 +20,12 @@ public interface IAccountRepository
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default);
     Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, TimeSpan maximumLifetime, TimeSpan idleTimeout, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        RotateRefreshTokenAsync(sessionId, oldRefreshTokenHash, newRefreshTokenHash, nowUtc, cancellationToken);
+    Task<int> RevokeExpiredSessionsAsync(DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        Task.FromResult(0);
     Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default);
     Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
@@ -50,6 +56,14 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
+    public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, TimeSpan maximumLifetime, TimeSpan idleTimeout, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<int> RevokeExpiredSessionsAsync(DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
     public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
@@ -75,6 +89,11 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
 
 public sealed class MySqlAccountRepository(string connectionString) : IAccountRepository
 {
+    public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+        byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        RotateRefreshTokenAsync(sessionId, oldRefreshTokenHash, newRefreshTokenHash, TimeSpan.FromHours(24),
+            TimeSpan.FromMinutes(5), nowUtc, cancellationToken);
+
     public async Task<CharacterLeaseRecord?> FindActiveCharacterLeaseForTransferAsync(Guid sessionId, long characterId,
         DateTime nowUtc, CancellationToken cancellationToken = default)
     {
@@ -159,7 +178,8 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
     }
 
     public async Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
-        byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default)
+        byte[] newRefreshTokenHash, TimeSpan maximumLifetime, TimeSpan idleTimeout, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
     {
         await using var connection = new MySqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -169,7 +189,10 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         update.CommandText = """
             UPDATE gateway_sessions
             SET refresh_token_hash = @new_refresh_token_hash,
-                last_seen_at_utc = @now_utc
+                last_seen_at_utc = @now_utc,
+                expires_at_utc = LEAST(
+                    DATE_ADD(created_at_utc, INTERVAL @maximum_lifetime_seconds SECOND),
+                    DATE_ADD(@now_utc, INTERVAL @idle_timeout_seconds SECOND))
             WHERE session_id = @session_id
               AND refresh_token_hash = @old_refresh_token_hash
               AND revoked_at_utc IS NULL
@@ -179,6 +202,8 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         update.Parameters.AddWithValue("@session_id", sessionId.ToString());
         update.Parameters.AddWithValue("@old_refresh_token_hash", oldRefreshTokenHash);
         update.Parameters.AddWithValue("@now_utc", nowUtc);
+        update.Parameters.AddWithValue("@maximum_lifetime_seconds", checked((long)maximumLifetime.TotalSeconds));
+        update.Parameters.AddWithValue("@idle_timeout_seconds", checked((long)idleTimeout.TotalSeconds));
         if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
         {
             await transaction.RollbackAsync(cancellationToken);
@@ -210,6 +235,20 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
         await reader.DisposeAsync();
         await transaction.CommitAsync(cancellationToken);
         return session;
+    }
+
+    public async Task<int> RevokeExpiredSessionsAsync(DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE gateway_sessions
+            SET revoked_at_utc = @now_utc, refresh_token_hash = NULL
+            WHERE revoked_at_utc IS NULL AND expires_at_utc <= @now_utc;
+            """;
+        command.Parameters.AddWithValue("@now_utc", nowUtc);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
