@@ -32,4 +32,12 @@ Provide a secure, stateless-capable entry point between clients and the internal
 
 ## Verification
 
+Administrative queries require current SQL sessions; in-game requests also require the calling instance's active character lease. Derive instance identity from its key. Forward typed queries and Gateway-attested identity over authenticated HTTPS using a distinct Administration service secret. SQL roles/scopes/audit remain Administration-owned. Resolving a transfer session never substitutes for the active lease check.
+
+Permission mutation requests use the same identity boundary and are re-authorized by Administration against `permissions.manage`. Snapshot/ACK routes are private to authenticated game-instance keys or active Gateway sessions; derive ACK instance IDs from the key. Never trust a caller-supplied account, session or instance identifier without checking the current session/lease.
+
 Test invalid credentials, expired tokens, replayed tickets, Coordinator failure, duplicate requests, reconnects and full target instances.
+
+## Nexus baseline credentials
+
+The base topology has eight group instances (`br-01`, `bw-01`, `ew-01`, `iw-01`, `ku-01`, `li-01`, `rh-01`, `mixed-01`). Use distinct instance keys from the Scripts-generated private JSON map through Gateway:GameInstanceKeysFile; never commit or log the map. This avoids invalid shell environment names for hyphenated IDs. Gateway remains responsible for identity and leases; Coordinator owns routing over each group instance's full SystemIds set.

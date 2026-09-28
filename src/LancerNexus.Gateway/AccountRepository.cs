@@ -15,6 +15,8 @@ public sealed record CharacterLeaseTransferResult(bool Accepted, string ReasonCo
 
 public interface IAccountRepository
 {
+    Task<SessionRecord?> FindActiveSessionAsync(Guid sessionId, Guid accountId, DateTime nowUtc,
+        CancellationToken cancellationToken = default) => Task.FromResult<SessionRecord?>(null);
     Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default);
     Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
         DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default);
@@ -89,6 +91,23 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
 
 public sealed class MySqlAccountRepository(string connectionString) : IAccountRepository
 {
+    public async Task<SessionRecord?> FindActiveSessionAsync(Guid sessionId, Guid accountId, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.expires_at_utc FROM gateway_sessions s JOIN accounts a ON a.account_id = s.account_id
+            WHERE s.session_id = @session AND s.account_id = @actor AND a.status = 'active'
+              AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now LIMIT 1
+            """;
+        command.Parameters.AddWithValue("@session", sessionId.ToString());
+        command.Parameters.AddWithValue("@actor", accountId.ToString());
+        command.Parameters.AddWithValue("@now", nowUtc);
+        var expiry = await command.ExecuteScalarAsync(cancellationToken);
+        return expiry is DateTime value ? new SessionRecord(accountId, DateTime.SpecifyKind(value, DateTimeKind.Utc)) : null;
+    }
     public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
         byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         RotateRefreshTokenAsync(sessionId, oldRefreshTokenHash, newRefreshTokenHash, TimeSpan.FromHours(24),

@@ -15,6 +15,10 @@ var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("admin", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0, AutoReplenishment = true }));
     options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
@@ -80,6 +84,12 @@ builder.Services.AddSingleton<TransferTicketCodec>();
 builder.Services.AddTransient<TransferInitiationService>();
 builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
+builder.Services.AddHttpClient<AdminQueryRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<AdminPermissionRelay>(http => http.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<AdminPermissionSnapshotRelay>(http => http.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddTransient<TransferAcceptanceService>();
 builder.Services.AddTransient<TransferSourceFreezeService>();
 builder.Services.AddTransient<TransferSnapshotReadService>();
@@ -248,6 +258,120 @@ app.MapPost("/api/v1/game/verify-ticket", async (
         systemId = claims.SystemId
     });
 });
+
+app.MapPost("/api/v1/game/admin/commands", async (GameAdminQueryRequest request,
+    GameInstanceKeyAuthenticator instances, AdminQueryRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    try { return AdminHttpResult(await relay.FromGameAsync(request, instanceId, ct)); }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or HttpRequestException or
+        System.Text.Json.JsonException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/game/admin/permissions/check", async (GamePermissionCheckRequest request,
+    GameInstanceKeyAuthenticator instances, AdminPermissionRelay relay,
+    AdminPermissionSnapshotRelay permissions, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    try
+    {
+        var allowed = await relay.CheckFromGameAsync(request, instanceId, permissions, ct);
+        return allowed is null ? Results.StatusCode(503) : Results.Ok(new { allowed });
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or HttpRequestException or
+        System.Text.Json.JsonException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/admin/commands", async (AdminQuery query, SessionTokenCodec tokens,
+    IAccountRepository accounts, AdminQueryRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!query.IsValid()) return Results.BadRequest();
+    var auth = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization, tokens, DateTime.UtcNow);
+    if (!auth.Accepted) return Results.Unauthorized();
+    try
+    {
+        if (await accounts.FindActiveSessionAsync(auth.Claims!.SessionId, auth.Claims.AccountId, DateTime.UtcNow, ct) is null)
+            return Results.Unauthorized();
+        return AdminHttpResult(await relay.SendAsync(auth.Claims.AccountId, "rest", query, ct));
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/admin/permissions/mutations", async (GatewayPermissionMutationRequest request,
+    SessionTokenCodec tokens, IAccountRepository accounts, AdminPermissionRelay relay,
+    HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var auth = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization, tokens, DateTime.UtcNow);
+    if (!auth.Accepted) return Results.Unauthorized();
+    try
+    {
+        if (await accounts.FindActiveSessionAsync(auth.Claims!.SessionId, auth.Claims.AccountId, DateTime.UtcNow, ct) is null)
+            return Results.Unauthorized();
+        var result = await relay.FromRestAsync(auth.Claims.AccountId, request, ct);
+        return Results.Json(result, statusCode: result.Status switch
+        { "ok" => 200, "denied" => 403, "invalid" => 400, "conflict" => 409, "unavailable" => 503, _ => 202 });
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapGet("/api/v1/admin/permissions/snapshot", async (SessionTokenCodec tokens,
+    IAccountRepository accounts, AdminPermissionSnapshotRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var auth = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization, tokens, DateTime.UtcNow);
+    if (!auth.Accepted) return Results.Unauthorized();
+    try
+    {
+        if (await accounts.FindActiveSessionAsync(auth.Claims!.SessionId, auth.Claims.AccountId, DateTime.UtcNow, ct) is null)
+            return Results.Unauthorized();
+        if (await relay.HasPermissionAsync(auth.Claims.AccountId, "permissions.manage", null, null, ct) != true) return Results.Forbid();
+        var json = await relay.ReadAsync(ct);
+        return json is null ? Results.StatusCode(503) : Results.Content(json, "application/json");
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/game/admin/permissions/mutations", async (GamePermissionMutationRequest request,
+    GameInstanceKeyAuthenticator instances, AdminPermissionRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    try
+    {
+        var result = await relay.FromGameAsync(request, instanceId, ct);
+        return Results.Json(result, statusCode: result.Status switch
+        { "ok" => 200, "denied" => 403, "invalid" => 400, "conflict" => 409, "unavailable" => 503, _ => 202 });
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapGet("/api/v1/game/admin/permissions/snapshot", async (GameInstanceKeyAuthenticator instances,
+    AdminPermissionSnapshotRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    var json = await relay.ReadAsync(ct);
+    return json is null ? Results.StatusCode(503) : Results.Content(json, "application/json");
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/game/admin/permissions/ack", async (LancerNexus.Protocol.PermissionRevisionAcknowledged ack,
+    GameInstanceKeyAuthenticator instances, AdminPermissionSnapshotRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    if (!instances.TryAuthenticate(context.Request, out var instanceId) || ack.Revision < 0) return Results.Unauthorized();
+    var applied = await relay.AcknowledgeAsync(new LancerNexus.Protocol.PermissionRevisionAcknowledged
+    { InstanceId = instanceId, Revision = ack.Revision, AppliedUtc = DateTimeOffset.UtcNow }, ct);
+    return applied ? Results.Ok() : Results.StatusCode(503);
+}).RequireRateLimiting("admin");
 
 app.MapPost("/api/v1/game/verify-transfer-ticket", async (
     TransferTicketVerificationRequest request,
@@ -682,6 +806,9 @@ static async Task LogStartupDiagnosticsAsync(
         logger.LogWarning("Gateway Coordinator probe failed ({FailureType}); placement may be unavailable.", exception.GetType().Name);
     }
 }
+
+static IResult AdminHttpResult(AdminQueryResponse result) => Results.Json(result, statusCode: result.Status switch
+{ "denied" => 403, "invalid" => 400, "conflict" => 409, "unavailable" => 503, "not_found" => 404, _ => 200 });
 
 public partial class Program;
 public sealed record JoinTicketVerificationRequest(string Ticket);
