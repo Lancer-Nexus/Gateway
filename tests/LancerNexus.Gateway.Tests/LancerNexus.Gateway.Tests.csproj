@@ -9,7 +9,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="../../db/migrations/001_identity_and_leases.sql;../../db/migrations/003_character_lease_transfers.sql"
+    <None Include="../../db/migrations/001_identity_and_leases.sql;../../db/migrations/003_character_lease_transfers.sql;../../db/migrations/005_character_transfer_decisions.sql"
           Link="db/migrations/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

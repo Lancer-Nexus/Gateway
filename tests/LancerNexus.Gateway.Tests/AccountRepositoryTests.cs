@@ -52,4 +52,15 @@ public sealed class AccountRepositoryTests
 
         Assert.Contains("not configured", error.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task TransferDecision_RejectsInvalidInputBeforeDatabaseAccess()
+    {
+        var repository = new MySqlAccountRepository("Server=127.0.0.1;Port=1;Database=unused;User ID=unused;");
+        Assert.Null(await repository.FindCharacterTransferDecisionAsync(Guid.Empty));
+        var rejected = await repository.AbortCharacterLeaseTransferAsync(
+            new(Guid.Empty, Guid.NewGuid(), 73, "source-01", "target-01", 14), DateTime.UtcNow);
+        Assert.False(rejected.Accepted);
+        Assert.Equal("invalid_transfer", rejected.ReasonCode);
+    }
 }

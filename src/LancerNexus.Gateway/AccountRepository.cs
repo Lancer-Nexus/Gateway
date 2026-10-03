@@ -17,6 +17,12 @@ public sealed record CharacterLeaseTransferCommitRecord(Guid TransferId, Guid Se
 
 public interface IAccountRepository
 {
+    Task<CharacterTransferDecision?> FindCharacterTransferDecisionAsync(Guid transferId,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character transfer decisions are not configured.");
+    Task<CharacterTransferAbortResult> AbortCharacterLeaseTransferAsync(CharacterTransferBinding binding,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character transfer decisions are not configured.");
     Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Authoritative character transfer reads are not configured.");
@@ -97,7 +103,7 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
 
-public sealed class MySqlAccountRepository(string connectionString) : IAccountRepository
+public sealed partial class MySqlAccountRepository(string connectionString) : IAccountRepository
 {
     public async Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
         CancellationToken cancellationToken = default)
@@ -382,6 +388,7 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
             expectedLeaseVersion < 0 || expectedLeaseVersion == long.MaxValue ||
             string.IsNullOrWhiteSpace(sourceInstanceId) ||
             string.IsNullOrWhiteSpace(targetInstanceId) ||
+            sourceInstanceId.Length > 96 || targetInstanceId.Length > 96 ||
             string.Equals(sourceInstanceId, targetInstanceId, StringComparison.Ordinal) ||
             targetLeaseTokenHash.Length != 32 || validUntilUtc <= nowUtc)
             return new CharacterLeaseTransferResult(false, "invalid_transfer", null);
@@ -402,6 +409,14 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
                 return new CharacterLeaseTransferResult(false, "character_not_found", null);
             }
         }
+
+        var binding = new CharacterTransferBinding(transferId, sessionId, characterId, sourceInstanceId,
+            targetInstanceId, expectedLeaseVersion);
+        var decision = await ReadDecisionAsync(connection, transaction, transferId, cancellationToken);
+        if (decision is not null && decision.Binding != binding)
+            return new(false, "transfer_id_conflict", null);
+        if (decision?.Kind == CharacterTransferDecisionKind.Aborted)
+            return new(false, "character_transfer_aborted", null);
 
         await using (var duplicate = connection.CreateCommand())
         {
@@ -428,6 +443,9 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
                     : new CharacterLeaseTransferResult(false, "transfer_id_conflict", null);
             }
         }
+
+        if (decision?.Kind == CharacterTransferDecisionKind.Committed)
+            return new(false, "character_transfer_commit_missing", null);
 
         await using (var sessionCheck = connection.CreateCommand())
         {
@@ -500,6 +518,9 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
             await record.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        if (decision is null)
+            await InsertDecisionAsync(connection, transaction, binding, CharacterTransferDecisionKind.Committed,
+                nowUtc, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new CharacterLeaseTransferResult(true, "committed", nextVersion);
     }
