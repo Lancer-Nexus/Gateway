@@ -11,7 +11,8 @@ public sealed class TransferLifecycleServicesTests
     public async Task SourceCanPollTransferStatusButOtherInstancesCannot()
     {
         var coordinator = new FakeCoordinator(TransferState.Committed, leaseVersion: 15);
-        var status = new TransferStatusService(coordinator);
+        var accounts = new FakeAccounts { Commit = coordinator.CommitRecord() };
+        var status = new TransferStatusService(coordinator, accounts);
 
         var source = await status.GetAsync(coordinator.TransferId, "li01-instance");
         var target = await status.GetAsync(coordinator.TransferId, "li02-instance");
@@ -23,6 +24,98 @@ public sealed class TransferLifecycleServicesTests
         Assert.True(target.Accepted);
         Assert.False(other.Accepted);
         Assert.Equal("transfer_instance_mismatch", other.ReasonCode);
+        Assert.Equal(2, accounts.ReadCalls);
+    }
+
+    [Theory]
+    [InlineData(TransferState.SourceFrozen)]
+    [InlineData(TransferState.TargetAccepted)]
+    public async Task SqlCommitIsReportedEvenWhenCoordinatorAcknowledgementWasLost(TransferState state)
+    {
+        var coordinator = new FakeCoordinator(state, leaseVersion: 0);
+        var accounts = new FakeAccounts { Commit = coordinator.CommitRecord() };
+        var status = new TransferStatusService(coordinator, accounts);
+        var result = await status.GetAsync(coordinator.TransferId, "li02-instance");
+        Assert.True(result.Accepted);
+        Assert.Equal(TransferState.Committed, result.Status!.State);
+        Assert.Equal(15, result.Status.LeaseVersion);
+    }
+
+    [Theory]
+    [InlineData(TransferState.Committed)]
+    [InlineData(TransferState.SourceReleased)]
+    public async Task CoordinatorAloneCannotProveCharacterOwnershipCommit(TransferState state)
+    {
+        var coordinator = new FakeCoordinator(state, leaseVersion: 15);
+        var result = await new TransferStatusService(coordinator, new FakeAccounts())
+            .GetAsync(coordinator.TransferId, "li02-instance");
+        Assert.False(result.Accepted);
+        Assert.Null(result.Status);
+        Assert.Equal("character_transfer_commit_missing", result.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    public async Task ConflictingCommitBindingFailsClosed(int field)
+    {
+        var coordinator = new FakeCoordinator(TransferState.Committed, leaseVersion: 15);
+        var commit = coordinator.CommitRecord();
+        commit = field switch
+        {
+            0 => commit with { TransferId = Guid.NewGuid() },
+            1 => commit with { SessionId = Guid.NewGuid() },
+            2 => commit with { CharacterId = 74 },
+            3 => commit with { SourceInstanceId = "other-source" },
+            4 => commit with { TargetInstanceId = "other-target" },
+            5 => commit with { ExpectedLeaseVersion = -1 },
+            6 => commit with { ExpectedLeaseVersion = long.MaxValue },
+            _ => commit with { CommittedLeaseVersion = 16 }
+        };
+        var result = await new TransferStatusService(coordinator, new FakeAccounts { Commit = commit })
+            .GetAsync(coordinator.TransferId, "li02-instance");
+        Assert.False(result.Accepted);
+        Assert.Equal("character_transfer_commit_mismatch", result.ReasonCode);
+    }
+
+    [Fact]
+    public async Task SqlCommitAndCoordinatorAbortCannotAuthorizeSourceRollback()
+    {
+        var coordinator = new FakeCoordinator(TransferState.Aborted, leaseVersion: 0);
+        var result = await new TransferStatusService(coordinator,
+                new FakeAccounts { Commit = coordinator.CommitRecord() })
+            .GetAsync(coordinator.TransferId, "li01-instance");
+        Assert.False(result.Accepted);
+        Assert.Null(result.Status);
+        Assert.Equal("character_transfer_commit_mismatch", result.ReasonCode);
+    }
+
+    [Fact]
+    public async Task UnavailableSqlCannotAuthorizeCommitOrRollback()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
+        var result = await new TransferStatusService(coordinator, new AccountRepositoryNotConfigured())
+            .GetAsync(coordinator.TransferId, "li01-instance");
+        Assert.False(result.Accepted);
+        Assert.Null(result.Status);
+        Assert.Equal(TransferSourceReleaseFailure.PersistenceUnavailable, result.Failure);
+    }
+
+    [Fact]
+    public async Task PendingTransferWithoutSqlCommitRetainsCoordinatorState()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
+        var result = await new TransferStatusService(coordinator, new FakeAccounts())
+            .GetAsync(coordinator.TransferId, "li02-instance");
+        Assert.True(result.Accepted);
+        Assert.Equal(TransferState.TargetAccepted, result.Status!.State);
+        Assert.Equal(0, result.Status.LeaseVersion);
     }
 
     [Fact]
@@ -30,7 +123,9 @@ public sealed class TransferLifecycleServicesTests
     {
         var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
         var snapshots = new FakeSnapshotStore();
-        var release = new TransferSourceReleaseService(coordinator, snapshots);
+        var accounts = new FakeAccounts();
+        var release = new TransferSourceReleaseService(coordinator, snapshots,
+            new TransferStatusService(coordinator, accounts));
 
         var early = await release.ReleaseAsync(new TransferSourceReleaseRequest
         { TransferId = coordinator.TransferId }, "li01-instance");
@@ -39,6 +134,7 @@ public sealed class TransferLifecycleServicesTests
         Assert.Equal(0, coordinator.SourceReleaseCalls);
 
         coordinator.SetState(TransferState.Committed, leaseVersion: 15);
+        accounts.Commit = coordinator.CommitRecord();
         var completed = await release.ReleaseAsync(new TransferSourceReleaseRequest
         { TransferId = coordinator.TransferId }, "li01-instance");
         var duplicate = await release.ReleaseAsync(new TransferSourceReleaseRequest
@@ -52,6 +148,36 @@ public sealed class TransferLifecycleServicesTests
         Assert.False(wrongSource.Accepted);
         Assert.Equal(1, coordinator.SourceReleaseCalls);
         Assert.Equal(2, snapshots.DeleteCalls);
+    }
+
+    [Fact]
+    public async Task SourceReleaseRepairsCoordinatorAfterSqlCommitAndLostAcknowledgement()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
+        var snapshots = new FakeSnapshotStore();
+        var release = new TransferSourceReleaseService(coordinator, snapshots,
+            new TransferStatusService(coordinator, new FakeAccounts { Commit = coordinator.CommitRecord() }));
+        var result = await release.ReleaseAsync(new TransferSourceReleaseRequest
+            { TransferId = coordinator.TransferId }, "li01-instance");
+        Assert.True(result.Accepted);
+        Assert.Equal(1, coordinator.CommitCalls);
+        Assert.Equal(1, coordinator.SourceReleaseCalls);
+        Assert.Equal(1, snapshots.DeleteCalls);
+    }
+
+    [Fact]
+    public async Task SourceReleaseCannotDeleteSnapshotWithoutSqlCommitProof()
+    {
+        var coordinator = new FakeCoordinator(TransferState.Committed, leaseVersion: 15);
+        var snapshots = new FakeSnapshotStore();
+        var release = new TransferSourceReleaseService(coordinator, snapshots,
+            new TransferStatusService(coordinator, new FakeAccounts()));
+        var result = await release.ReleaseAsync(new TransferSourceReleaseRequest
+            { TransferId = coordinator.TransferId }, "li01-instance");
+        Assert.False(result.Accepted);
+        Assert.Equal(0, coordinator.CommitCalls);
+        Assert.Equal(0, coordinator.SourceReleaseCalls);
+        Assert.Equal(0, snapshots.DeleteCalls);
     }
 
     private sealed class FakeSnapshotStore : ITransferSnapshotStore
@@ -76,12 +202,17 @@ public sealed class TransferLifecycleServicesTests
         private TransferState state = state;
         private long leaseVersion = leaseVersion;
         public Guid TransferId { get; } = Guid.NewGuid();
+        private readonly Guid sessionId = Guid.NewGuid();
         public int SourceReleaseCalls { get; private set; }
+        public int CommitCalls { get; private set; }
+
+        public CharacterLeaseTransferCommitRecord CommitRecord() =>
+            new(TransferId, sessionId, 73, "li01-instance", "li02-instance", 14, 15);
 
         private CoordinatorTransferSnapshot Snapshot() => new(TransferId, new TransferPrepareRequest
         {
             TransferId = TransferId,
-            SessionId = Guid.NewGuid(),
+            SessionId = sessionId,
             CharacterId = 73,
             SourceInstanceId = "li01-instance",
             TargetInstanceId = "li02-instance",
@@ -112,7 +243,41 @@ public sealed class TransferLifecycleServicesTests
         public Task<CoordinatorTransferCallResult> PrepareAsync(TransferPrepareRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<CoordinatorTransferStateResult> MarkSourceFrozenAsync(Guid transferId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<CoordinatorTransferStateResult> MarkTargetAcceptedAsync(Guid transferId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task<CoordinatorTransferStateResult> CommitAsync(Guid transferId, long leaseVersion, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CoordinatorTransferStateResult> CommitAsync(Guid transferId, long leaseVersion, CancellationToken cancellationToken = default)
+        {
+            CommitCalls++;
+            Assert.Equal(TransferId, transferId);
+            Assert.Equal(15, leaseVersion);
+            state = TransferState.Committed;
+            this.leaseVersion = leaseVersion;
+            return Task.FromResult(new CoordinatorTransferStateResult(HttpStatusCode.OK,
+                new CoordinatorTransferOutcome(true, "accepted", state, false), null));
+        }
         public Task<CoordinatorTransferStateResult> AbortAsync(TransferAbort request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeAccounts : IAccountRepository
+    {
+        public CharacterLeaseTransferCommitRecord? Commit { get; set; }
+        public int ReadCalls { get; private set; }
+        public Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
+            CancellationToken cancellationToken = default)
+        {
+            ReadCalls++;
+            return Task.FromResult(Commit);
+        }
+        public Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task CreateSessionAsync(Guid sessionId, Guid accountId, byte[] nonceHash, byte[] refreshTokenHash,
+            DateTime createdAtUtc, DateTime expiresAtUtc, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<SessionRecord?> RotateRefreshTokenAsync(Guid sessionId, byte[] oldRefreshTokenHash,
+            byte[] newRefreshTokenHash, DateTime nowUtc, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId, long characterId,
+            DateTime nowUtc, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+            long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
+            byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }

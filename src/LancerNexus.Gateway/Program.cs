@@ -425,9 +425,9 @@ app.MapPost("/api/v1/game/release-transfer", async (
         app.Logger.LogWarning("Game transfer source release rejected: {ReasonCode}.", result.ReasonCode);
         return result.Failure switch
         {
-            TransferSourceReleaseFailure.CoordinatorUnavailable =>
+            TransferSourceReleaseFailure.CoordinatorUnavailable or TransferSourceReleaseFailure.PersistenceUnavailable =>
                 Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
-            TransferSourceReleaseFailure.CoordinatorInvalidResponse =>
+            TransferSourceReleaseFailure.CoordinatorInvalidResponse or TransferSourceReleaseFailure.PersistenceInvalidResponse =>
                 Results.StatusCode(StatusCodes.Status502BadGateway),
             TransferSourceReleaseFailure.SnapshotStoreUnavailable =>
                 Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
@@ -533,6 +533,7 @@ app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
 {
     if (!gameInstances.TryAuthenticate(context.Request, out var instanceId))
         return Results.Unauthorized();
+    context.Response.Headers.CacheControl = "no-store";
     var result = await status.GetAsync(transferId, instanceId, cancellationToken);
     if (result.Accepted)
         return Results.Ok(result.Status);
@@ -541,6 +542,10 @@ app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
     {
         TransferSourceReleaseFailure.CoordinatorUnavailable =>
             Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        TransferSourceReleaseFailure.PersistenceUnavailable =>
+            Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        TransferSourceReleaseFailure.PersistenceInvalidResponse =>
+            Results.StatusCode(StatusCodes.Status502BadGateway),
         TransferSourceReleaseFailure.CoordinatorInvalidResponse =>
             Results.StatusCode(StatusCodes.Status502BadGateway),
         _ => Results.NotFound()

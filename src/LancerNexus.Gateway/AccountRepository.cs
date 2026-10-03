@@ -12,9 +12,14 @@ public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
 public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
 public sealed record CharacterLeaseRecord(string InstanceId, long LeaseVersion, DateTime ValidUntilUtc);
 public sealed record CharacterLeaseTransferResult(bool Accepted, string ReasonCode, long? LeaseVersion);
+public sealed record CharacterLeaseTransferCommitRecord(Guid TransferId, Guid SessionId, long CharacterId,
+    string SourceInstanceId, string TargetInstanceId, long ExpectedLeaseVersion, long CommittedLeaseVersion);
 
 public interface IAccountRepository
 {
+    Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Authoritative character transfer reads are not configured.");
     Task<SessionRecord?> FindActiveSessionAsync(Guid sessionId, Guid accountId, DateTime nowUtc,
         CancellationToken cancellationToken = default) => Task.FromResult<SessionRecord?>(null);
     Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default);
@@ -45,6 +50,9 @@ public interface IAccountRepository
 
 public sealed class AccountRepositoryNotConfigured : IAccountRepository
 {
+    public Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
     public Task<AccountRecord?> FindByEmailAsync(
         string email,
         CancellationToken cancellationToken = default) =>
@@ -91,6 +99,29 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository
 
 public sealed class MySqlAccountRepository(string connectionString) : IAccountRepository
 {
+    public async Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
+        CancellationToken cancellationToken = default)
+    {
+        if (transferId == Guid.Empty)
+            return null;
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        // A historical commit is durable even after session expiry or a later transfer.
+        // Do not treat absence of a current active lease as evidence of rollback.
+        command.CommandText = """
+            SELECT session_id, character_id, source_instance_id, target_instance_id,
+                   expected_lease_version, committed_lease_version
+            FROM character_lease_transfers WHERE transfer_id = @transfer_id;
+            """;
+        command.Parameters.AddWithValue("@transfer_id", transferId.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new(transferId, reader.GetGuid(0), reader.GetInt64(1), reader.GetString(2),
+                reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5))
+            : null;
+    }
+
     public async Task<SessionRecord?> FindActiveSessionAsync(Guid sessionId, Guid accountId, DateTime nowUtc,
         CancellationToken cancellationToken = default)
     {
@@ -384,7 +415,7 @@ public sealed class MySqlAccountRepository(string connectionString) : IAccountRe
             await using var reader = await duplicate.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                var matches = reader.GetString(0) == sessionId.ToString() && reader.GetInt64(1) == characterId &&
+                var matches = reader.GetGuid(0) == sessionId && reader.GetInt64(1) == characterId &&
                     reader.GetString(2) == sourceInstanceId && reader.GetString(3) == targetInstanceId &&
                     reader.GetInt64(4) == expectedLeaseVersion &&
                     System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(

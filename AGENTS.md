@@ -18,6 +18,7 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Validate token issuer, audience, expiry, account, session, target instance and transfer-ticket state.
 - Authenticate game-instance calls with distinct per-instance bearer keys and derive the caller's instance ID from that credential; never trust an unauthenticated instance ID for ticket verification or lease transfer.
 - Switch character leases only after Coordinator records `TargetAccepted`; use the MySQL transfer journal for idempotent retries, then advance Coordinator to `Committed`.
+- Transfer status and source release require the durable MySQL character commit record, bound to transfer/session/character/source/target and the incremented lease version. Coordinator status alone is not ownership proof. Preserve historical commits after lease/session expiry and later handoffs; do not report rollback on conflicting state or persistence failures. Source release can finish a lost Coordinator commit acknowledgement before deleting staged snapshots.
 - Use MySQL transactions for account and character ownership changes.
 - Use idempotency keys for login, assignment and transfer operations where retries are possible.
 - Do not make placement decisions independently of the Coordinator except during an explicitly documented degraded mode.

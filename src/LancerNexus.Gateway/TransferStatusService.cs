@@ -1,4 +1,5 @@
 using LancerNexus.Protocol;
+using MySqlConnector;
 
 namespace LancerNexus.Gateway;
 
@@ -10,7 +11,7 @@ public sealed record TransferStatusResult(
     public bool Accepted => Status is not null && Failure == TransferSourceReleaseFailure.None;
 }
 
-public sealed class TransferStatusService(ICoordinatorTransferClient coordinator)
+public sealed class TransferStatusService(ICoordinatorTransferClient coordinator, IAccountRepository accounts)
 {
     public async Task<TransferStatusResult> GetAsync(
         Guid transferId,
@@ -32,15 +33,49 @@ public sealed class TransferStatusService(ICoordinatorTransferClient coordinator
         if (!string.Equals(transfer.Request.SourceInstanceId, authenticatedInstanceId, StringComparison.Ordinal) &&
             !string.Equals(transfer.Request.TargetInstanceId, authenticatedInstanceId, StringComparison.Ordinal))
             return Failed("transfer_instance_mismatch");
+
+        CharacterLeaseTransferCommitRecord? committed;
+        try
+        {
+            committed = await accounts.FindCharacterLeaseTransferCommitAsync(transferId, cancellationToken);
+        }
+        catch (Exception exception) when (exception is MySqlException or InvalidOperationException)
+        {
+            return new(null, TransferSourceReleaseFailure.PersistenceUnavailable,
+                "character_transfer_persistence_unavailable");
+        }
+        var state = transfer.State;
+        var version = transfer.LeaseVersion;
+        if (committed is not null)
+        {
+            if (committed.TransferId != transferId || committed.SessionId != transfer.Request.SessionId ||
+                committed.CharacterId != transfer.Request.CharacterId ||
+                !string.Equals(committed.SourceInstanceId, transfer.Request.SourceInstanceId, StringComparison.Ordinal) ||
+                !string.Equals(committed.TargetInstanceId, transfer.Request.TargetInstanceId, StringComparison.Ordinal) ||
+                committed.ExpectedLeaseVersion < 0 || committed.ExpectedLeaseVersion == long.MaxValue ||
+                committed.CommittedLeaseVersion != committed.ExpectedLeaseVersion + 1 ||
+                state is not (TransferState.SourceFrozen or TransferState.TargetAccepted or
+                    TransferState.Committed or TransferState.SourceReleased) ||
+                (state is TransferState.Committed or TransferState.SourceReleased && version != committed.CommittedLeaseVersion))
+                return new(null, TransferSourceReleaseFailure.PersistenceInvalidResponse,
+                    "character_transfer_commit_mismatch");
+            // SQL is authoritative in the crash window after lease commit but
+            // before the Coordinator acknowledgement. Never advertise rollback.
+            state = state == TransferState.SourceReleased ? state : TransferState.Committed;
+            version = committed.CommittedLeaseVersion;
+        }
+        else if (state is TransferState.Committed or TransferState.SourceReleased)
+            return new(null, TransferSourceReleaseFailure.PersistenceInvalidResponse,
+                "character_transfer_commit_missing");
         return new(new TransferStatusResponse
         {
             TransferId = transfer.TransferId,
             SourceInstanceId = transfer.Request.SourceInstanceId,
             TargetInstanceId = transfer.Request.TargetInstanceId,
             TargetSystemId = transfer.Request.TargetSystemId,
-            State = transfer.State,
+            State = state,
             ExpiresUtc = transfer.ExpiresUtc,
-            LeaseVersion = transfer.LeaseVersion
+            LeaseVersion = version
         }, TransferSourceReleaseFailure.None, "accepted");
     }
 
