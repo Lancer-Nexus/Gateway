@@ -119,6 +119,96 @@ public sealed class TransferLifecycleServicesTests
     }
 
     [Fact]
+    public async Task MissionAuthorityConfirmsSqlCommitInCoordinatorAcknowledgementWindow()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, 0);
+        var committed = coordinator.CommitRecord();
+        var accounts = new FakeAccounts
+        {
+            Commit = committed,
+            Decision = new(new(committed.TransferId, committed.SessionId, 73, "li01-instance", "li02-instance", 14),
+                CharacterTransferDecisionKind.Committed)
+        };
+        var authority = new NpcMissionAuthorityService(coordinator, accounts, new FakeSnapshotStore(), TimeProvider.System);
+        var request = AuthorityRequest(coordinator, NpcTransferState.Committed);
+        Assert.True((await authority.DecideAsync(request)).Authorizes(request));
+        Assert.False((await authority.DecideAsync(request with { Decision = NpcTransferState.Aborted })).Accepted);
+        Assert.Equal(0, accounts.AbortCalls);
+    }
+
+    [Fact]
+    public async Task MissionAuthorityAbortIsPermanentAndReplayDoesNotNeedSnapshot()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, 0);
+        var accounts = new FakeAccounts();
+        var snapshots = new FakeSnapshotStore
+        {
+            ReadResult = new(TransferSnapshotStoreStatus.Stored, new(new(coordinator.TransferId,
+                "li01-instance", "li02-instance", 73, 14, DateTime.UtcNow), [1]))
+        };
+        var authority = new NpcMissionAuthorityService(coordinator, accounts, snapshots, TimeProvider.System);
+        var request = AuthorityRequest(coordinator, NpcTransferState.Aborted);
+        Assert.True((await authority.DecideAsync(request)).Authorizes(request));
+        Assert.Equal(14, accounts.Decision!.Binding.ExpectedLeaseVersion);
+        snapshots.ReadResult = new(TransferSnapshotStoreStatus.Unavailable);
+        authority = new(coordinator, accounts, snapshots, TimeProvider.System);
+        Assert.True((await authority.DecideAsync(request)).Authorizes(request));
+        Assert.Equal(1, accounts.AbortCalls);
+        Assert.False((await authority.DecideAsync(request with { Decision = NpcTransferState.Committed })).Accepted);
+    }
+
+    [Fact]
+    public async Task MissionAuthorityRejectsWrongBindingAndUncommittedOwnership()
+    {
+        var coordinator = new FakeCoordinator(TransferState.TargetAccepted, 0);
+        var accounts = new FakeAccounts();
+        var authority = new NpcMissionAuthorityService(coordinator, accounts, new FakeSnapshotStore(), TimeProvider.System);
+        var request = AuthorityRequest(coordinator, NpcTransferState.Committed);
+        Assert.False((await authority.DecideAsync(request)).Accepted);
+        Assert.False((await authority.DecideAsync(request with { TargetSystemId = "li03" })).Accepted);
+        Assert.False((await authority.DecideAsync(request with { SourceInstanceId = "wrong-source" })).Accepted);
+        Assert.False((await authority.DecideAsync(request with { TargetInstanceId = "wrong-target" })).Accepted);
+        Assert.Equal(0, accounts.AbortCalls);
+    }
+
+    [Fact]
+    public async Task FrozenMissionWithoutCharacterSnapshotCannotAuthorizeRollback()
+    {
+        var coordinator = new FakeCoordinator(TransferState.SourceFrozen, 0);
+        var accounts = new FakeAccounts();
+        var authority = new NpcMissionAuthorityService(coordinator, accounts, new FakeSnapshotStore(), TimeProvider.System);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            authority.DecideAsync(AuthorityRequest(coordinator, NpcTransferState.Aborted)));
+        Assert.Equal(0, accounts.AbortCalls);
+    }
+
+    [Fact]
+    public async Task DurableAbortRemainsDiscoverableAfterLostCoordinatorAcknowledgement()
+    {
+        var coordinator = new FakeCoordinator(TransferState.SourceFrozen, 0);
+        var committed = coordinator.CommitRecord();
+        var accounts = new FakeAccounts
+        {
+            Decision = new(new(committed.TransferId, committed.SessionId, 73, "li01-instance", "li02-instance", 14),
+                CharacterTransferDecisionKind.Aborted)
+        };
+        var result = await new TransferStatusService(coordinator, accounts)
+            .GetAsync(coordinator.TransferId, "li01-instance");
+        Assert.True(result.Accepted);
+        Assert.Equal(TransferState.Aborted, result.Status!.State);
+        var authority = new NpcMissionAuthorityService(coordinator, accounts, new FakeSnapshotStore(), TimeProvider.System);
+        var request = AuthorityRequest(coordinator, NpcTransferState.Aborted);
+        Assert.True((await authority.DecideAsync(request)).Authorizes(request));
+        Assert.Equal(0, accounts.AbortCalls);
+    }
+
+    private static NpcMissionAuthorityRequestV1 AuthorityRequest(FakeCoordinator coordinator, NpcTransferState state) => new()
+    {
+        TransferId = coordinator.TransferId, SourceInstanceId = "li01-instance", TargetInstanceId = "li02-instance",
+        TargetSystemId = "li02", Decision = state
+    };
+
+    [Fact]
     public async Task SourceReleaseRequiresCommittedLeaseAndIsIdempotent()
     {
         var coordinator = new FakeCoordinator(TransferState.TargetAccepted, leaseVersion: 0);
@@ -183,12 +273,13 @@ public sealed class TransferLifecycleServicesTests
     private sealed class FakeSnapshotStore : ITransferSnapshotStore
     {
         public int DeleteCalls { get; private set; }
+        public TransferSnapshotStoreResult ReadResult { get; set; } = new(TransferSnapshotStoreStatus.NotFound);
 
         public Task<TransferSnapshotStoreResult> StoreAsync(TransferSnapshotMetadata metadata,
             ReadOnlyMemory<byte> snapshot, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public Task<TransferSnapshotStoreResult> ReadAsync(Guid transferId,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+            CancellationToken cancellationToken = default) => Task.FromResult(ReadResult);
 
         public Task<bool> DeleteAsync(Guid transferId, CancellationToken cancellationToken = default)
         {
@@ -253,12 +344,29 @@ public sealed class TransferLifecycleServicesTests
             return Task.FromResult(new CoordinatorTransferStateResult(HttpStatusCode.OK,
                 new CoordinatorTransferOutcome(true, "accepted", state, false), null));
         }
-        public Task<CoordinatorTransferStateResult> AbortAsync(TransferAbort request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<CoordinatorTransferStateResult> AbortAsync(TransferAbort request, CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(TransferId, request.TransferId);
+            state = TransferState.Aborted;
+            return Task.FromResult(new CoordinatorTransferStateResult(HttpStatusCode.OK,
+                new CoordinatorTransferOutcome(true, "aborted", state, false), null));
+        }
     }
 
     private sealed class FakeAccounts : IAccountRepository
     {
         public CharacterLeaseTransferCommitRecord? Commit { get; set; }
+        public CharacterTransferDecision? Decision { get; set; }
+        public int AbortCalls { get; private set; }
+        public Task<CharacterTransferDecision?> FindCharacterTransferDecisionAsync(Guid transferId,
+            CancellationToken cancellationToken = default) => Task.FromResult(Decision);
+        public Task<CharacterTransferAbortResult> AbortCharacterLeaseTransferAsync(CharacterTransferBinding binding,
+            DateTime nowUtc, CancellationToken cancellationToken = default)
+        {
+            AbortCalls++;
+            Decision = new(binding, CharacterTransferDecisionKind.Aborted);
+            return Task.FromResult(new CharacterTransferAbortResult(true, "aborted"));
+        }
         public int ReadCalls { get; private set; }
         public Task<CharacterLeaseTransferCommitRecord?> FindCharacterLeaseTransferCommitAsync(Guid transferId,
             CancellationToken cancellationToken = default)

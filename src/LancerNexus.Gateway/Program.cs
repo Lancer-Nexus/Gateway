@@ -95,6 +95,8 @@ builder.Services.AddTransient<TransferSourceFreezeService>();
 builder.Services.AddTransient<TransferSnapshotReadService>();
 builder.Services.AddTransient<TransferSourceReleaseService>();
 builder.Services.AddTransient<TransferStatusService>();
+builder.Services.AddTransient<NpcMissionAuthorityService>();
+builder.Services.AddSingleton<NpcMissionAuthorityAuthenticator>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddSingleton<GatewayReadinessHealthCheck>();
 builder.Services.AddHealthChecks()
@@ -523,6 +525,26 @@ app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
     }
     return Results.Ok(new { transferId = result.TransferId, instanceId, state = "SourceFrozen", snapshotBytes = total });
 }).RequireRateLimiting("transfer");
+
+app.MapPost("/internal/v1/npc-mission-authority", async (
+    NpcMissionAuthorityRequestV1 request, NpcMissionAuthorityService authority,
+    NpcMissionAuthorityAuthenticator authentication, HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!authentication.IsConfigured)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authentication.TryAuthenticate(context.Request))
+        return Results.Unauthorized();
+    try
+    {
+        var result = await authority.DecideAsync(request, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (Exception exception) when (exception is InvalidOperationException or MySqlConnector.MySqlException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 app.MapGet("/api/v1/game/transfers/{transferId:guid}", async (
     Guid transferId,

@@ -59,4 +59,13 @@ public sealed class GameInstanceKeyAuthenticator(IConfiguration configuration)
         instanceId = match;
         return true;
     }
+
+    // Unlike identity resolution, this also recognizes credentials accidentally
+    // shared by multiple instances. Service authority must reject all of them.
+    public bool IsKnownCredential(string token)
+    {
+        var suppliedHash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return keys.Values.Any(value => !string.IsNullOrWhiteSpace(value) &&
+            CryptographicOperations.FixedTimeEquals(suppliedHash, SHA256.HashData(Encoding.UTF8.GetBytes(value))));
+    }
 }

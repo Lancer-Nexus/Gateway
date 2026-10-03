@@ -35,9 +35,11 @@ public sealed class TransferStatusService(ICoordinatorTransferClient coordinator
             return Failed("transfer_instance_mismatch");
 
         CharacterLeaseTransferCommitRecord? committed;
+        CharacterTransferDecision? decision;
         try
         {
             committed = await accounts.FindCharacterLeaseTransferCommitAsync(transferId, cancellationToken);
+            decision = await accounts.FindCharacterTransferDecisionAsync(transferId, cancellationToken);
         }
         catch (Exception exception) when (exception is MySqlException or InvalidOperationException)
         {
@@ -46,6 +48,21 @@ public sealed class TransferStatusService(ICoordinatorTransferClient coordinator
         }
         var state = transfer.State;
         var version = transfer.LeaseVersion;
+        if (decision?.Kind == CharacterTransferDecisionKind.Aborted)
+        {
+            var binding = decision.Binding;
+            if (committed is not null || binding.TransferId != transferId ||
+                binding.SessionId != transfer.Request.SessionId || binding.CharacterId != transfer.Request.CharacterId ||
+                binding.SourceInstanceId != transfer.Request.SourceInstanceId ||
+                binding.TargetInstanceId != transfer.Request.TargetInstanceId ||
+                binding.ExpectedLeaseVersion < 0 || binding.ExpectedLeaseVersion == long.MaxValue ||
+                state is TransferState.Committed or TransferState.SourceReleased)
+                return new(null, TransferSourceReleaseFailure.PersistenceInvalidResponse,
+                    "character_transfer_abort_mismatch");
+            // Durable veto is rollback proof even if its Coordinator ACK was lost.
+            state = TransferState.Aborted;
+            version = binding.ExpectedLeaseVersion;
+        }
         if (committed is not null)
         {
             if (committed.TransferId != transferId || committed.SessionId != transfer.Request.SessionId ||
