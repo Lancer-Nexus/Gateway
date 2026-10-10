@@ -14,7 +14,8 @@ public sealed class GameInstanceKeyAuthenticatorTests
         {
             File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, string>
             {
-                ["br-01"] = new string('b', 40), ["mixed-01"] = new string('m', 40)
+                ["br-01"] = new string('b', 40),
+                ["mixed-01"] = new string('m', 40)
             }));
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {

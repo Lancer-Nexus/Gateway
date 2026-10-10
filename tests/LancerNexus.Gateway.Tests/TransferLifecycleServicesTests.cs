@@ -204,8 +204,11 @@ public sealed class TransferLifecycleServicesTests
 
     private static NpcMissionAuthorityRequestV1 AuthorityRequest(FakeCoordinator coordinator, NpcTransferState state) => new()
     {
-        TransferId = coordinator.TransferId, SourceInstanceId = "li01-instance", TargetInstanceId = "li02-instance",
-        TargetSystemId = "li02", Decision = state
+        TransferId = coordinator.TransferId,
+        SourceInstanceId = "li01-instance",
+        TargetInstanceId = "li02-instance",
+        TargetSystemId = "li02",
+        Decision = state
     };
 
     [Fact]
@@ -248,7 +251,7 @@ public sealed class TransferLifecycleServicesTests
         var release = new TransferSourceReleaseService(coordinator, snapshots,
             new TransferStatusService(coordinator, new FakeAccounts { Commit = coordinator.CommitRecord() }));
         var result = await release.ReleaseAsync(new TransferSourceReleaseRequest
-            { TransferId = coordinator.TransferId }, "li01-instance");
+        { TransferId = coordinator.TransferId }, "li01-instance");
         Assert.True(result.Accepted);
         Assert.Equal(1, coordinator.CommitCalls);
         Assert.Equal(1, coordinator.SourceReleaseCalls);
@@ -263,7 +266,7 @@ public sealed class TransferLifecycleServicesTests
         var release = new TransferSourceReleaseService(coordinator, snapshots,
             new TransferStatusService(coordinator, new FakeAccounts()));
         var result = await release.ReleaseAsync(new TransferSourceReleaseRequest
-            { TransferId = coordinator.TransferId }, "li01-instance");
+        { TransferId = coordinator.TransferId }, "li01-instance");
         Assert.False(result.Accepted);
         Assert.Equal(0, coordinator.CommitCalls);
         Assert.Equal(0, coordinator.SourceReleaseCalls);

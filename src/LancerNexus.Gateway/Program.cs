@@ -9,6 +9,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 var loginRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:LoginRateLimitPerMinute", 10);
 var placementRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:PlacementRateLimitPerMinute", 30);
+var eventRegistrationRateLimit = ReadPositiveLimit(builder.Configuration,
+    "Gateway:EventRegistrationRateLimitPerMinute", 10);
 var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
 var transferStatusRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferStatusRateLimitPerMinute", 120);
 var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:SessionRefreshRateLimitPerMinute", 120);
@@ -46,6 +48,15 @@ builder.Services.AddRateLimiter(options =>
             QueueLimit = 0,
             AutoReplenishment = true
         }));
+    options.AddPolicy("event-registration", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = eventRegistrationRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
     options.AddPolicy("transfer", context => RateLimitPartition.GetFixedWindowLimiter(
         TransferRateLimitPartition.GetKey(context),
         _ => new FixedWindowRateLimiterOptions
@@ -77,6 +88,7 @@ var joinTicketOptions = JoinTicketOptions.FromConfiguration(builder.Configuratio
 builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<JoinTicketReplayStore>();
+builder.Services.AddTransient<CharacterLeaseAcquisitionService>();
 builder.Services.AddSingleton<ITransferTicketReplayStore>(services => services.GetRequiredService<JoinTicketReplayStore>());
 var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(transferTicketOptions);
@@ -86,9 +98,13 @@ builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
 builder.Services.AddHttpClient<AdminQueryRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<AdminActionRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<AdminPermissionRelay>(http => http.Timeout = TimeSpan.FromSeconds(10))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<AdminPermissionSnapshotRelay>(http => http.Timeout = TimeSpan.FromSeconds(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<GatewayEventRegistrationRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddTransient<TransferAcceptanceService>();
 builder.Services.AddTransient<TransferSourceFreezeService>();
@@ -107,6 +123,8 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
     string.IsNullOrWhiteSpace(gatewayConnectionString)
         ? new AccountRepositoryNotConfigured()
         : new MySqlAccountRepository(gatewayConnectionString));
+builder.Services.AddSingleton<ICharacterLeaseAcquisitionStore>(services =>
+    (ICharacterLeaseAcquisitionStore)services.GetRequiredService<IAccountRepository>());
 if (!string.IsNullOrWhiteSpace(gatewayConnectionString))
     builder.Services.AddHostedService<ExpiredSessionCleanupService>();
 builder.Services.AddSingleton<TransferSnapshotProtection>();
@@ -135,7 +153,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_lease_acquire_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -224,6 +242,39 @@ app.MapGet("/api/v1/characters", async (
     }
 });
 
+app.MapPost("/api/v1/events/{eventId}/registrations", async (string eventId,
+    GatewayEventRegistrationSubmission request, SessionTokenCodec sessionTokens,
+    IAccountRepository accounts, GatewayEventRegistrationRelay relay, HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var authorization = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization,
+        sessionTokens, DateTime.UtcNow);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+    if (!AdminQuery.ValidIdentifier(eventId))
+        return Results.BadRequest(new { error = "invalid_event_id" });
+
+    var claims = authorization.Claims!;
+    try
+    {
+        if (await accounts.FindActiveSessionAsync(claims.SessionId, claims.AccountId,
+                DateTime.UtcNow, cancellationToken) is null)
+            return Results.Unauthorized();
+        var decision = await relay.FromRestAsync(claims.AccountId, claims.SessionId,
+            eventId, request, cancellationToken);
+        return Results.Json(decision,
+            statusCode: (int)GatewayEventRegistrationRelay.ExpectedStatusCode(decision.Status));
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException or
+                                  OperationCanceledException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("event-registration");
+
 app.MapPost("/api/v1/game/verify-ticket", async (
     JoinTicketVerificationRequest request,
     JoinTicketCodec joinTickets,
@@ -261,12 +312,51 @@ app.MapPost("/api/v1/game/verify-ticket", async (
     });
 });
 
+app.MapPost("/api/v1/game/acquire-character-lease", async (
+    CharacterLeaseAcquireRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    CharacterLeaseAcquisitionService acquisition,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_character_lease_request" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId))
+        return Results.Unauthorized();
+
+    var result = await acquisition.AcquireAsync(request, instanceId, cancellationToken);
+    if (!result.IsValid())
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    if (result.Accepted)
+        return Results.Ok(result);
+    return result.ReasonCode switch
+    {
+        "join_ticket_invalid" or "join_ticket_instance_mismatch" => Results.Unauthorized(),
+        "lease_owned" => Results.Conflict(result),
+        "character_lease_persistence_unavailable" or "lease_lifetime_configuration_invalid" =>
+            Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        _ => Results.BadRequest(result)
+    };
+});
+
 app.MapPost("/api/v1/game/admin/commands", async (GameAdminQueryRequest request,
     GameInstanceKeyAuthenticator instances, AdminQueryRelay relay, HttpContext context, CancellationToken ct) =>
 {
     context.Response.Headers.CacheControl = "no-store";
     if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
     try { return AdminHttpResult(await relay.FromGameAsync(request, instanceId, ct)); }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or HttpRequestException or
+        System.Text.Json.JsonException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/game/admin/actions", async (GameAdminActionRequest request,
+    GameInstanceKeyAuthenticator instances, AdminActionRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    try { return AdminActionHttpResult(await relay.FromGameAsync(request, instanceId, ct)); }
     catch (Exception e) when (e is MySqlException or InvalidOperationException or HttpRequestException or
         System.Text.Json.JsonException or OperationCanceledException)
     { return Results.StatusCode(503); }
@@ -302,6 +392,24 @@ app.MapPost("/api/v1/admin/commands", async (AdminQuery query, SessionTokenCodec
         return AdminHttpResult(await relay.SendAsync(auth.Claims.AccountId, "rest", query, ct));
     }
     catch (Exception e) when (e is MySqlException or InvalidOperationException or OperationCanceledException)
+    { return Results.StatusCode(503); }
+}).RequireRateLimiting("admin");
+
+app.MapPost("/api/v1/admin/actions", async (AdminActionRequestV1 request, SessionTokenCodec tokens,
+    IAccountRepository accounts, AdminActionRelay relay, HttpContext context, CancellationToken ct) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var auth = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization, tokens, DateTime.UtcNow);
+    if (!auth.Accepted) return Results.Unauthorized();
+    try
+    {
+        var claims = auth.Claims!;
+        if (await accounts.FindActiveSessionAsync(claims.SessionId, claims.AccountId, DateTime.UtcNow, ct) is null)
+            return Results.Unauthorized();
+        return AdminActionHttpResult(await relay.FromRestAsync(claims.AccountId, claims.SessionId, request, ct));
+    }
+    catch (Exception e) when (e is MySqlException or InvalidOperationException or HttpRequestException or
+        System.Text.Json.JsonException or OperationCanceledException)
     { return Results.StatusCode(503); }
 }).RequireRateLimiting("admin");
 
@@ -835,7 +943,19 @@ static async Task LogStartupDiagnosticsAsync(
 }
 
 static IResult AdminHttpResult(AdminQueryResponse result) => Results.Json(result, statusCode: result.Status switch
-{ "denied" => 403, "invalid" => 400, "conflict" => 409, "unavailable" => 503, "not_found" => 404, _ => 200 });
+{ "ok" => 200, "denied" => 403, "invalid" => 400, "conflict" => 409, "unavailable" => 503, "not_found" => 404, _ => 503 });
+
+static IResult AdminActionHttpResult(AdminActionResultV1 result) => Results.Json(result, statusCode: result.Status switch
+{
+    AdminActionStatus.Pending => 202,
+    AdminActionStatus.Completed => 200,
+    AdminActionStatus.Denied => 403,
+    AdminActionStatus.Invalid => 400,
+    AdminActionStatus.NotFound => 404,
+    AdminActionStatus.Conflict => 409,
+    AdminActionStatus.Unavailable => 503,
+    _ => 503
+});
 
 public partial class Program;
 public sealed record JoinTicketVerificationRequest(string Ticket);

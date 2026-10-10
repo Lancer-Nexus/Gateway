@@ -17,7 +17,9 @@ public class TransferRateLimitPartitionTests
             RateLimitPartition.GetFixedWindowLimiter(TransferRateLimitPartition.GetKey(context),
                 _ => new FixedWindowRateLimiterOptions
                 {
-                    PermitLimit = 2, Window = TimeSpan.FromMinutes(1), QueueLimit = 0,
+                    PermitLimit = 2,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
                     AutoReplenishment = false
                 }));
         var routes = new[] { "start-transfer", "freeze-transfer/{transferId:guid}",

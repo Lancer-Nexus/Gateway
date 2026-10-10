@@ -12,7 +12,7 @@ public sealed class NpcMissionAuthorityAuthenticatorTests
     {
         var key = new string('x', 32);
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-            { ["Gateway:NpcMissionAuthorityApiKey"] = key }).Build();
+        { ["Gateway:NpcMissionAuthorityApiKey"] = key }).Build();
         var authentication = new NpcMissionAuthorityAuthenticator(config, new GameInstanceKeyAuthenticator(config));
         var context = new DefaultHttpContext();
         context.Request.Headers.Authorization = "Bearer " + key;
@@ -28,7 +28,8 @@ public sealed class NpcMissionAuthorityAuthenticatorTests
         Assert.False(missing.TryAuthenticate(context.Request));
         var shared = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["Gateway:NpcMissionAuthorityApiKey"] = key, ["Gateway:GameInstanceKeys:source"] = key,
+            ["Gateway:NpcMissionAuthorityApiKey"] = key,
+            ["Gateway:GameInstanceKeys:source"] = key,
             ["Gateway:GameInstanceKeys:target"] = key
         }).Build();
         context.Request.Headers.Authorization = "Bearer " + key;

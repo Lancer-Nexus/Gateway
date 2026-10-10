@@ -37,8 +37,18 @@ public sealed record CoordinatorTransferLookupResult(HttpStatusCode? StatusCode,
     public bool IsAvailable => StatusCode is not null;
 }
 
+public sealed record CoordinatorRegistryInstance(string InstanceId, string SystemId, bool IsReady,
+    bool IsDraining, bool AgentIsAlive, bool IsAlive, string[]? SystemIds = null);
+public sealed record CoordinatorRegistryLookupResult(HttpStatusCode? StatusCode,
+    IReadOnlyList<CoordinatorRegistryInstance>? Instances, string? Error)
+{
+    public bool IsAvailable => StatusCode is not null;
+}
+
 public interface ICoordinatorTransferClient
 {
+    Task<CoordinatorRegistryLookupResult> GetRegistryAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CoordinatorRegistryLookupResult(null, null, "coordinator_registry_unavailable"));
     Task<CoordinatorTransferLookupResult> GetTransferAsync(Guid transferId, CancellationToken cancellationToken = default);
     Task<CoordinatorTransferCallResult> PrepareAsync(TransferPrepareRequest request,
         CancellationToken cancellationToken = default);
@@ -57,6 +67,32 @@ public interface ICoordinatorTransferClient
 public sealed class CoordinatorTransferClient(HttpClient httpClient, CoordinatorGatewayOptions options)
     : ICoordinatorTransferClient
 {
+    public async Task<CoordinatorRegistryLookupResult> GetRegistryAsync(CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured)
+            return new(null, null, "coordinator_not_configured");
+        using var message = CreateRequest(HttpMethod.Get, "internal/v1/registry");
+        var send = await SendAsync(message, cancellationToken);
+        using var response = send.Response;
+        if (response is null)
+            return new(null, null, send.Error);
+        if (!response.IsSuccessStatusCode)
+            return new(response.StatusCode, null, "coordinator_registry_rejected");
+        var registry = await response.Content.ReadFromJsonAsync<CoordinatorRegistryWire>(cancellationToken);
+        if (registry?.Instances is null || registry.Instances.Length > 4096 || registry.Instances.Any(instance =>
+                instance is null || !AdminQuery.ValidIdentifier(instance.InstanceId) ||
+                !AdminQuery.ValidIdentifier(instance.SystemId) ||
+                (instance.SystemIds?.Length ?? 0) > 128 ||
+                instance.SystemIds?.Any(system => !AdminQuery.ValidIdentifier(system)) == true))
+            return new(response.StatusCode, null, "coordinator_invalid_response");
+        if (registry.Instances.Select(instance => instance.InstanceId)
+            .Distinct(StringComparer.Ordinal).Count() != registry.Instances.Length)
+            return new(response.StatusCode, null, "coordinator_invalid_response");
+        return new(response.StatusCode, registry.Instances, null);
+    }
+
+    private sealed record CoordinatorRegistryWire(CoordinatorRegistryInstance[]? Instances);
+
     public async Task<CoordinatorTransferLookupResult> GetTransferAsync(Guid transferId,
         CancellationToken cancellationToken = default)
     {

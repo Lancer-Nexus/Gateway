@@ -42,6 +42,33 @@ public sealed class AdminQueryRelayTests
         Assert.Equal("unavailable", result.Status);
     }
 
+    [Fact]
+    public async Task UnknownAdministrationResponseStatusIsUnavailable()
+    {
+        var handler = new Handler { ResponseStatus = "accepted" };
+        var result = await Relay(handler, new Accounts("li-01")).FromGameAsync(Request(), "li-01", default);
+
+        Assert.Equal("unavailable", result.Status);
+    }
+
+    [Fact]
+    public async Task AdministrationHttpFailureCannotBeOverriddenByAnOkResponseBody()
+    {
+        var handler = new Handler { ResponseCode = HttpStatusCode.ServiceUnavailable };
+        var result = await Relay(handler, new Accounts("li-01")).FromGameAsync(Request(), "li-01", default);
+
+        Assert.Equal("unavailable", result.Status);
+    }
+
+    [Fact]
+    public async Task CoherentAdministrationDenialStatusIsPreserved()
+    {
+        var handler = new Handler { ResponseStatus = "denied", ResponseCode = HttpStatusCode.Forbidden };
+        var result = await Relay(handler, new Accounts("li-01")).FromGameAsync(Request(), "li-01", default);
+
+        Assert.Equal("denied", result.Status);
+    }
+
     [Theory]
     [InlineData(TransferState.SourceFrozen, "denied")]
     [InlineData(TransferState.SourceReleased, "ok")]
@@ -50,25 +77,42 @@ public sealed class AdminQueryRelayTests
         var original = Request();
         var transferId = Guid.NewGuid();
         var session = Guid.NewGuid();
-        var snapshot = new CoordinatorTransferSnapshot(transferId, new TransferPrepareRequest {
-            TransferId = transferId, SessionId = session, CharacterId = original.CharacterId,
-            TargetInstanceId = "li-01", SourceInstanceId = "ku-01" }, state, DateTime.UtcNow, 2);
+        var snapshot = new CoordinatorTransferSnapshot(transferId, new TransferPrepareRequest
+        {
+            TransferId = transferId,
+            SessionId = session,
+            CharacterId = original.CharacterId,
+            TargetInstanceId = "li-01",
+            SourceInstanceId = "ku-01"
+        }, state, DateTime.UtcNow, 2);
         var coordinator = new CoordinatorTransferClient(new HttpClient(new TransferHandler(snapshot)),
             new CoordinatorGatewayOptions(new Uri("https://coordinator.example"), new string('k', 32), TimeSpan.FromSeconds(1)));
         var accounts = new Accounts("li-01");
-        var result = await Relay(new Handler(), accounts, coordinator).FromGameAsync(new GameAdminQueryRequest {
-            AccountId = original.AccountId, CharacterId = original.CharacterId, TransferId = transferId, Query = original.Query },
+        var result = await Relay(new Handler(), accounts, coordinator).FromGameAsync(new GameAdminQueryRequest
+        {
+            AccountId = original.AccountId,
+            CharacterId = original.CharacterId,
+            TransferId = transferId,
+            Query = original.Query
+        },
             "li-01", default);
         Assert.Equal(expected, result.Status);
         Assert.Equal(expected == "ok" ? session : Guid.Empty, accounts.Session);
     }
 
-    private static GameAdminQueryRequest Request() => new() { AccountId = Guid.NewGuid(), SessionId = Guid.NewGuid(),
-        CharacterId = 1, Query = new AdminQuery { CorrelationId = Guid.NewGuid(), IdempotencyKey = "test", Kind = AdminQueryKind.Status } };
+    private static GameAdminQueryRequest Request() => new()
+    {
+        AccountId = Guid.NewGuid(),
+        SessionId = Guid.NewGuid(),
+        CharacterId = 1,
+        Query = new AdminQuery { CorrelationId = Guid.NewGuid(), IdempotencyKey = "test", Kind = AdminQueryKind.Status }
+    };
     private static AdminQueryRelay Relay(Handler handler, Accounts accounts, ICoordinatorTransferClient? coordinator = null) => new(new HttpClient(handler),
-        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> {
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
             ["Gateway:AdministrationBaseUrl"] = "https://localhost:9999",
-            ["Gateway:AdministrationApiKey"] = new string('x', 32) }).Build(), accounts,
+            ["Gateway:AdministrationApiKey"] = new string('x', 32)
+        }).Build(), accounts,
         coordinator ?? new CoordinatorTransferClient(new HttpClient(), new CoordinatorGatewayOptions(null, null, TimeSpan.FromSeconds(1))), TimeProvider.System);
     private sealed class TransferHandler(CoordinatorTransferSnapshot snapshot) : HttpMessageHandler
     {
@@ -79,13 +123,22 @@ public sealed class AdminQueryRelayTests
     {
         public int Calls;
         public bool WrongCorrelation;
+        public string ResponseStatus = "ok";
+        public HttpStatusCode ResponseCode = HttpStatusCode.OK;
         public AuthorizedAdminQueryRequest? Body;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Calls++;
             Body = await request.Content!.ReadFromJsonAsync<AuthorizedAdminQueryRequest>(ct);
-            return new(HttpStatusCode.OK) { Content = JsonContent.Create(new AdminQueryResponse {
-                CorrelationId = WrongCorrelation ? Guid.NewGuid() : Body!.Query.CorrelationId, Status = "ok", Lines = ["Cluster"] }) };
+            return new(ResponseCode)
+            {
+                Content = JsonContent.Create(new AdminQueryResponse
+                {
+                    CorrelationId = WrongCorrelation ? Guid.NewGuid() : Body!.Query.CorrelationId,
+                    Status = ResponseStatus,
+                    Lines = ["Cluster"]
+                })
+            };
         }
     }
     private sealed class Accounts(string? instance) : IAccountRepository

@@ -56,6 +56,9 @@ public sealed class MySqlCharacterTransferCommitTests
             }
 
             var repository = new MySqlAccountRepository(databaseConfig.ConnectionString);
+            var activeTarget = await repository.FindActiveCharacterTargetLeaseAsync(73, now);
+            Assert.Equal("source-01", activeTarget?.InstanceId);
+            Assert.Null(await repository.FindActiveCharacterTargetLeaseAsync(999, now));
             Assert.Null(await repository.FindCharacterLeaseTransferCommitAsync(transfer));
             Assert.Null(await repository.FindCharacterLeaseTransferCommitAsync(Guid.Empty));
             var committed = await repository.CommitCharacterLeaseTransferAsync(transfer, session, 73,
@@ -65,6 +68,7 @@ public sealed class MySqlCharacterTransferCommitTests
             var expected = new CharacterLeaseTransferCommitRecord(transfer, session, 73,
                 "source-01", "target-01", 14, 15);
             repository = new MySqlAccountRepository(databaseConfig.ConnectionString);
+            Assert.Equal("target-01", (await repository.FindActiveCharacterTargetLeaseAsync(73, now))?.InstanceId);
             Assert.Equal(expected, await repository.FindCharacterLeaseTransferCommitAsync(transfer));
 
             var replay = await repository.CommitCharacterLeaseTransferAsync(transfer, session, 73,
@@ -171,6 +175,7 @@ public sealed class MySqlCharacterTransferCommitTests
             repository = new MySqlAccountRepository(databaseConfig.ConnectionString);
             Assert.Equal(expected, await repository.FindCharacterLeaseTransferCommitAsync(transfer));
             Assert.Null(await repository.FindActiveCharacterLeaseForTransferAsync(session, 73, now));
+            Assert.Null(await repository.FindActiveCharacterTargetLeaseAsync(73, now));
             var expiredBinding = new CharacterTransferBinding(Guid.NewGuid(), session, 73, currentOwner,
                 currentOwner == "source-01" ? "target-01" : "source-01", currentVersion);
             Assert.True((await repository.AbortCharacterLeaseTransferAsync(expiredBinding, now)).Accepted);

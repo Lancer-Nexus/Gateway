@@ -58,6 +58,20 @@ public sealed class CoordinatorTransferClientTests
         Assert.Equal("Bearer", handler.Authorization!.Scheme);
     }
 
+    [Fact]
+    public async Task Registry_UsesAuthenticatedInternalRouteAndReadsInstanceState()
+    {
+        using var handler = new CaptureHandler(registryResponse: true);
+        using var httpClient = new HttpClient(handler);
+
+        var result = await CreateClient(httpClient).GetRegistryAsync();
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal("ku-01", Assert.Single(result.Instances!).InstanceId);
+        Assert.Equal("Bearer", handler.Authorization!.Scheme);
+        Assert.Equal("https://coordinator.example/internal/v1/registry", handler.RequestUri!.ToString());
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
@@ -95,7 +109,8 @@ public sealed class CoordinatorTransferClientTests
     };
 
     private sealed class CaptureHandler(Guid? responseTransferId = null, bool stateResponse = false,
-        TransferPrepareRequest? lookupRequest = null, DateTimeOffset? lookupExpiry = null) : HttpMessageHandler
+        TransferPrepareRequest? lookupRequest = null, DateTimeOffset? lookupExpiry = null,
+        bool registryResponse = false) : HttpMessageHandler
     {
         public AuthenticationHeaderValue? Authorization { get; private set; }
         public string? Body { get; private set; }
@@ -108,7 +123,21 @@ public sealed class CoordinatorTransferClientTests
             RequestUri = request.RequestUri;
             Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             object payload;
-            if (lookupRequest is not null)
+            if (registryResponse)
+            {
+                payload = new
+                {
+                    agents = Array.Empty<object>(),
+                    instances = new[]
+                {
+                    new { AgentId = "agent-1", InstanceId = "ku-01", SystemId = "ku01", IsReady = true,
+                        IsDraining = false, CurrentPlayers = 1, ReservedPlayers = 0, MaxPlayers = 200,
+                        Endpoint = "localhost:26000", Sequence = 1, LastHeartbeatUtc = DateTimeOffset.UtcNow,
+                        AgentIsAlive = true, IsAlive = true, SystemIds = new[] { "ku01" } }
+                }
+                };
+            }
+            else if (lookupRequest is not null)
             {
                 payload = new
                 {

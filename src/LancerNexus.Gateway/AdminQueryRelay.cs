@@ -43,7 +43,20 @@ public sealed class AdminQueryRelay(HttpClient http, IConfiguration configuratio
             using var response = await http.SendAsync(message, ct);
             var result = await response.Content.ReadFromJsonAsync<AdminQueryResponse>(ct);
             if (result is null || result.CorrelationId != query.CorrelationId || result.Lines is null ||
+                result.Status is not ("ok" or "denied" or "invalid" or "conflict" or "unavailable" or "not_found") ||
                 result.Lines.Length > 65 || result.Lines.Any(line => line is null || line.Length > 8192))
+                return Reject(query.CorrelationId, "unavailable");
+            var expectedStatusCode = result.Status switch
+            {
+                "ok" => System.Net.HttpStatusCode.OK,
+                "denied" => System.Net.HttpStatusCode.Forbidden,
+                "invalid" => System.Net.HttpStatusCode.BadRequest,
+                "conflict" => System.Net.HttpStatusCode.Conflict,
+                "unavailable" => System.Net.HttpStatusCode.ServiceUnavailable,
+                "not_found" => System.Net.HttpStatusCode.NotFound,
+                _ => (System.Net.HttpStatusCode?)null
+            };
+            if (expectedStatusCode is null || response.StatusCode != expectedStatusCode)
                 return Reject(query.CorrelationId, "unavailable");
             return result;
         }
@@ -52,6 +65,11 @@ public sealed class AdminQueryRelay(HttpClient http, IConfiguration configuratio
     }
 
     private static AdminQueryResponse Reject(Guid id, string status) => new()
-    { CorrelationId = id, Status = status, Lines = [status == "denied" ?
-        "Keine gültige Sitzung/Charakterzuordnung für diesen Administrationsbefehl." : "Administration derzeit nicht verfügbar oder Anfrage ungültig."] };
+    {
+        CorrelationId = id,
+        Status = status,
+        Lines = [status == "denied"
+            ? "Keine gültige Sitzung/Charakterzuordnung für diesen Administrationsbefehl."
+            : "Administration derzeit nicht verfügbar oder Anfrage ungültig."]
+    };
 }

@@ -17,6 +17,7 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Passwords are accepted only at the authentication boundary and are never forwarded to game servers.
 - Validate token issuer, audience, expiry, account, session, target instance and transfer-ticket state.
 - Authenticate game-instance calls with distinct per-instance bearer keys and derive the caller's instance ID from that credential; never trust an unauthenticated instance ID for ticket verification or lease transfer.
+- Initial character lease acquisition occurs only after character selection. Require both the authenticated instance key and signed join-ticket binding, verify the selected character belongs to the active ticket account/session, and serialize lease create/takeover with a MySQL character-row lock. Initial fencing starts at 1; every expired-lease takeover increments it. Store only the hash of the proposed lease token and make retries with that same token idempotent.
 - Switch character leases only after Coordinator records `TargetAccepted`; use the MySQL transfer journal for idempotent retries, then advance Coordinator to `Committed`.
 - Transfer status and source release require the durable MySQL character commit record, bound to transfer/session/character/source/target and the incremented lease version. Coordinator status alone is not ownership proof. Preserve historical commits after lease/session expiry and later handoffs; do not report rollback on conflicting state or persistence failures. Source release can finish a lost Coordinator commit acknowledgement before deleting staged snapshots.
 - Use MySQL transactions for account and character ownership changes.
@@ -38,6 +39,8 @@ Provide a secure, stateless-capable entry point between clients and the internal
 Administrative queries require current SQL sessions; in-game requests also require the calling instance's active character lease. Derive instance identity from its key. Forward typed queries and Gateway-attested identity over authenticated HTTPS using a distinct Administration service secret. SQL roles/scopes/audit remain Administration-owned. Resolving a transfer session never substitutes for the active lease check.
 
 Permission mutation requests use the same identity boundary and are re-authorized by Administration against `permissions.manage`. Snapshot/ACK routes are private to authenticated game-instance keys or active Gateway sessions; derive ACK instance IDs from the key. Never trust a caller-supplied account, session or instance identifier without checking the current session/lease.
+
+Event-registration relays must derive account/session from the authenticated token, require the current MySQL session and character lease, overwrite any client identity/fence values, and send only over HTTPS with the distinct Events service key. Keep registration capacity and lifecycle decisions Events-owned; Coordinator event-instance reservations, result acceptance and return-transfer integration are separate responsibilities.
 
 Test invalid credentials, expired tokens, replayed tickets, Coordinator failure, duplicate requests, reconnects and full target instances.
 
