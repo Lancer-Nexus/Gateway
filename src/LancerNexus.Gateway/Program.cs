@@ -13,7 +13,7 @@ var eventRegistrationRateLimit = ReadPositiveLimit(builder.Configuration,
     "Gateway:EventRegistrationRateLimitPerMinute", 10);
 var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
 var transferStatusRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferStatusRateLimitPerMinute", 120);
-var characterSnapshotRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:CharacterSnapshotRateLimitPerMinute", 120);
+var characterSnapshotRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:CharacterSnapshotRateLimitPerMinute", 600);
 var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:SessionRefreshRateLimitPerMinute", 120);
 builder.Services.AddRateLimiter(options =>
 {
