@@ -23,13 +23,16 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
-                "db", "migrations", "001_identity_and_leases.sql"));
-            foreach (var statement in migration.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "008_character_tombstones.sql" })
             {
-                await using var schema = connection.CreateCommand();
-                schema.CommandText = statement;
-                await schema.ExecuteNonQueryAsync();
+                var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
+                    "db", "migrations", migrationName));
+                foreach (var statement in migration.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    await using var schema = connection.CreateCommand();
+                    schema.CommandText = statement;
+                    await schema.ExecuteNonQueryAsync();
+                }
             }
 
             var now = DateTime.UtcNow;

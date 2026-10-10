@@ -202,7 +202,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT character_id FROM characters WHERE character_id = @character FOR UPDATE;";
+        command.CommandText = "SELECT character_id FROM characters WHERE character_id = @character AND deleted_at_utc IS NULL FOR UPDATE;";
         command.Parameters.AddWithValue("@character", characterId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }

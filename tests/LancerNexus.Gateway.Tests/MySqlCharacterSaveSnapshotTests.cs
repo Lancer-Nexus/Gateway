@@ -25,7 +25,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql" })
+            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql", "008_character_tombstones.sql" })
             {
                 var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
                     "db", "migrations", migrationName));

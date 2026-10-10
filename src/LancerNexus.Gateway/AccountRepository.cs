@@ -12,6 +12,8 @@ public sealed record AccountRecord(
 
 public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
 public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
+public sealed record CharacterRosterStoreResult(bool SessionAccepted, IReadOnlyList<CharacterRecord> Characters);
+public sealed record CharacterDeletionStoreResult(string ReasonCode);
 public sealed record CharacterIdentityResolveStoreResult(bool Accepted, string ReasonCode, long? CharacterId);
 public sealed record CharacterLeaseRecord(string InstanceId, long LeaseVersion, DateTime ValidUntilUtc);
 public sealed record CharacterLeaseAcquireResult(bool Accepted, string ReasonCode, long? LeaseVersion,
@@ -53,6 +55,12 @@ public interface IAccountRepository
         Task.FromResult(0);
     Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default);
+    Task<CharacterRosterStoreResult> ListActiveCharactersForSessionAsync(Guid accountId, Guid sessionId,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character roster persistence is not configured.");
+    Task<CharacterDeletionStoreResult> TombstoneCharacterAsync(CharacterDeletionRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character deletion persistence is not configured.");
     Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId, Guid sessionId,
         string displayName, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Character identity resolution is not configured.");
@@ -108,6 +116,14 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository, ICharac
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
+    public Task<CharacterRosterStoreResult> ListActiveCharactersForSessionAsync(Guid accountId, Guid sessionId,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterDeletionStoreResult> TombstoneCharacterAsync(CharacterDeletionRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
     public Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId, Guid sessionId,
         string displayName, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
@@ -159,7 +175,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await using (var characterLock = connection.CreateCommand())
         {
             characterLock.Transaction = transaction;
-            characterLock.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
+            characterLock.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id AND deleted_at_utc IS NULL FOR UPDATE;";
             characterLock.Parameters.AddWithValue("@character_id", characterId);
             var ownerValue = await characterLock.ExecuteScalarAsync(cancellationToken);
             var ownerId = ownerValue switch
@@ -288,6 +304,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             UPDATE character_leases l
             INNER JOIN gateway_sessions s ON s.session_id = l.session_id
             INNER JOIN accounts a ON a.account_id = s.account_id
+            INNER JOIN characters c ON c.character_id = l.character_id AND c.deleted_at_utc IS NULL
             SET l.valid_until_utc = @valid_until_utc
             WHERE l.character_id = @character_id AND l.instance_id = @instance_id
               AND l.lease_version = @lease_version AND l.lease_token_hash = @lease_token_hash
@@ -322,7 +339,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         command.CommandText = """
             SELECT l.instance_id, l.lease_version, l.valid_until_utc
             FROM character_leases l
-            INNER JOIN characters c ON c.character_id = l.character_id
+            INNER JOIN characters c ON c.character_id = l.character_id AND c.deleted_at_utc IS NULL
             INNER JOIN gateway_sessions s ON s.session_id = l.session_id
             INNER JOIN accounts a ON a.account_id = s.account_id AND a.account_id = c.account_id
             WHERE c.character_id = @character_id AND s.revoked_at_utc IS NULL
@@ -395,7 +412,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             FROM character_leases l
             INNER JOIN gateway_sessions s ON s.session_id = l.session_id
             INNER JOIN accounts a ON a.account_id = s.account_id
-            INNER JOIN characters c ON c.character_id = l.character_id AND c.account_id = a.account_id
+            INNER JOIN characters c ON c.character_id = l.character_id AND c.account_id = a.account_id AND c.deleted_at_utc IS NULL
             WHERE l.session_id = @session_id AND l.character_id = @character_id
               AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc
               AND a.status = 'active' AND l.valid_until_utc > @now_utc
@@ -549,6 +566,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             SELECT character_id, display_name, created_at_utc
             FROM characters
             WHERE account_id = @account_id
+              AND deleted_at_utc IS NULL
             ORDER BY character_id;
             """;
         command.Parameters.AddWithValue("@account_id", accountId.ToString());
@@ -557,6 +575,147 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         while (await reader.ReadAsync(cancellationToken))
             characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
         return characters;
+    }
+
+    public async Task<CharacterRosterStoreResult> ListActiveCharactersForSessionAsync(Guid accountId, Guid sessionId,
+        DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (accountId == Guid.Empty || sessionId == Guid.Empty)
+            return new(false, []);
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var session = connection.CreateCommand())
+        {
+            session.Transaction = transaction;
+            session.CommandText = """
+                SELECT s.session_id FROM gateway_sessions s
+                INNER JOIN accounts a ON a.account_id = s.account_id
+                WHERE s.session_id = @session_id AND s.account_id = @account_id
+                  AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc AND a.status = 'active';
+                """;
+            session.Parameters.AddWithValue("@session_id", sessionId.ToString("D"));
+            session.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
+            session.Parameters.AddWithValue("@now_utc", nowUtc);
+            if (await session.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(false, []);
+            }
+        }
+        var characters = new List<CharacterRecord>();
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT character_id, display_name, created_at_utc FROM characters
+                WHERE account_id = @account_id AND deleted_at_utc IS NULL ORDER BY character_id;
+                """;
+            command.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return new(true, characters);
+    }
+
+    public async Task<CharacterDeletionStoreResult> TombstoneCharacterAsync(CharacterDeletionRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (!request.IsValid())
+            return new("character_not_found");
+        if (await FindActiveSessionAsync(request.SessionId, request.AccountId, nowUtc, cancellationToken) is null)
+            return new("session_rejected");
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        bool found;
+        bool alreadyDeleted;
+        await using (var character = connection.CreateCommand())
+        {
+            character.Transaction = transaction;
+            character.CommandText = """
+                SELECT character_id, deleted_at_utc FROM characters
+                WHERE character_id = @character_id AND account_id = @account_id FOR UPDATE;
+                """;
+            character.Parameters.AddWithValue("@character_id", request.CharacterId);
+            character.Parameters.AddWithValue("@account_id", request.AccountId.ToString("D"));
+            await using var reader = await character.ExecuteReaderAsync(cancellationToken);
+            found = await reader.ReadAsync(cancellationToken);
+            alreadyDeleted = found && !reader.IsDBNull(1);
+        }
+        if (!found)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new("character_not_found");
+        }
+
+        await using (var session = connection.CreateCommand())
+        {
+            session.Transaction = transaction;
+            session.CommandText = """
+                SELECT s.session_id FROM gateway_sessions s
+                INNER JOIN accounts a ON a.account_id = s.account_id
+                WHERE s.session_id = @session_id AND s.account_id = @account_id
+                  AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc AND a.status = 'active'
+                FOR UPDATE;
+                """;
+            session.Parameters.AddWithValue("@session_id", request.SessionId.ToString("D"));
+            session.Parameters.AddWithValue("@account_id", request.AccountId.ToString("D"));
+            session.Parameters.AddWithValue("@now_utc", nowUtc);
+            if (await session.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new("session_rejected");
+            }
+        }
+        if (alreadyDeleted)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new("duplicate");
+        }
+
+        await using (var lease = connection.CreateCommand())
+        {
+            lease.Transaction = transaction;
+            lease.CommandText = "SELECT valid_until_utc FROM character_leases WHERE character_id = @character_id FOR UPDATE;";
+            lease.Parameters.AddWithValue("@character_id", request.CharacterId);
+            var value = await lease.ExecuteScalarAsync(cancellationToken);
+            if (value is DateTime expiry && expiry > nowUtc)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new("character_in_use");
+            }
+        }
+
+        await using (var transfer = connection.CreateCommand())
+        {
+            transfer.Transaction = transaction;
+            transfer.CommandText = "SELECT transfer_id FROM character_transfer_snapshots WHERE character_id = @character_id LIMIT 1 FOR UPDATE;";
+            transfer.Parameters.AddWithValue("@character_id", request.CharacterId);
+            if (await transfer.ExecuteScalarAsync(cancellationToken) is not null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new("transfer_in_progress");
+            }
+        }
+
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = "UPDATE characters SET deleted_at_utc = @now_utc, updated_at_utc = @now_utc WHERE character_id = @character_id AND deleted_at_utc IS NULL;";
+            update.Parameters.AddWithValue("@now_utc", nowUtc);
+            update.Parameters.AddWithValue("@character_id", request.CharacterId);
+            if (await update.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new("character_not_found");
+            }
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return new("deleted");
     }
 
     public async Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId,
@@ -620,7 +779,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await using (var owner = connection.CreateCommand())
         {
             owner.Transaction = transaction;
-            owner.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
+            owner.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id AND deleted_at_utc IS NULL FOR UPDATE;";
             owner.Parameters.AddWithValue("@character_id", characterId);
             var ownerId = await owner.ExecuteScalarAsync(cancellationToken);
             belongsToAccount = ownerId switch
@@ -645,7 +804,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         command.CommandText = """
             SELECT character_id, display_name, created_at_utc
             FROM characters
-            WHERE account_id = @account_id AND character_id = @character_id
+            WHERE account_id = @account_id AND character_id = @character_id AND deleted_at_utc IS NULL
             LIMIT 1;
             """;
         command.Parameters.AddWithValue("@account_id", accountId.ToString());
@@ -669,7 +828,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         command.CommandText = """
             SELECT l.instance_id, l.lease_version, l.valid_until_utc
             FROM character_leases l
-            INNER JOIN characters c ON c.character_id = l.character_id
+            INNER JOIN characters c ON c.character_id = l.character_id AND c.deleted_at_utc IS NULL
             INNER JOIN gateway_sessions s ON s.session_id = l.session_id
             INNER JOIN accounts a ON a.account_id = s.account_id
             WHERE c.character_id = @character_id AND c.account_id = @account_id
@@ -710,7 +869,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await using (var characterLock = connection.CreateCommand())
         {
             characterLock.Transaction = transaction;
-            characterLock.CommandText = "SELECT character_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
+            characterLock.CommandText = "SELECT character_id FROM characters WHERE character_id = @character_id AND deleted_at_utc IS NULL FOR UPDATE;";
             characterLock.Parameters.AddWithValue("@character_id", characterId);
             if (await characterLock.ExecuteScalarAsync(cancellationToken) is null)
             {
@@ -763,7 +922,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
                 SELECT 1 FROM gateway_sessions s
                 INNER JOIN accounts a ON a.account_id = s.account_id
                 INNER JOIN characters c ON c.account_id = a.account_id
-                WHERE s.session_id = @session_id AND c.character_id = @character_id
+                WHERE s.session_id = @session_id AND c.character_id = @character_id AND c.deleted_at_utc IS NULL
                   AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc AND a.status = 'active';
                 """;
             sessionCheck.Parameters.AddWithValue("@session_id", sessionId.ToString());

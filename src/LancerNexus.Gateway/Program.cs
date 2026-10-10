@@ -375,6 +375,78 @@ app.MapPost("/api/v1/game/renew-character-lease", async (
         : Results.Conflict(result);
 }).RequireRateLimiting("character-snapshot");
 
+app.MapPost("/api/v1/game/characters/list", async (
+    CharacterRosterRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    IAccountRepository accounts,
+    HttpContext context,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_roster_request" });
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    try
+    {
+        var result = await accounts.ListActiveCharactersForSessionAsync(request.AccountId, request.SessionId,
+            timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+        if (!result.SessionAccepted) return Results.Unauthorized();
+        var response = new CharacterRosterResultV1
+        {
+            CorrelationId = request.CorrelationId,
+            Accepted = true,
+            ReasonCode = "listed",
+            Characters = result.Characters.Select(character => new CharacterRosterEntryV1
+            {
+                CharacterId = character.CharacterId,
+                DisplayName = character.DisplayName
+            }).ToArray()
+        };
+        return response.IsValid() ? Results.Ok(response) : Results.StatusCode(StatusCodes.Status502BadGateway);
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/api/v1/game/characters/delete", async (
+    CharacterDeletionRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    IAccountRepository accounts,
+    HttpContext context,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_deletion_request" });
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    try
+    {
+        var result = await accounts.TombstoneCharacterAsync(request, timeProvider.GetUtcNow().UtcDateTime,
+            cancellationToken);
+        var response = new CharacterDeletionResultV1
+        {
+            CorrelationId = request.CorrelationId,
+            Accepted = result.ReasonCode is "deleted" or "duplicate",
+            ReasonCode = result.ReasonCode
+        };
+        if (!response.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+        return result.ReasonCode switch
+        {
+            "deleted" or "duplicate" => Results.Ok(response),
+            "session_rejected" => Results.Unauthorized(),
+            "character_not_found" => Results.NotFound(response),
+            "character_in_use" or "transfer_in_progress" => Results.Conflict(response),
+            _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        };
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("character-snapshot");
+
 app.MapPost("/api/v1/game/characters/resolve-identity", async (
     CharacterIdentityResolveRequestV1 request,
     GameInstanceKeyAuthenticator instances,

@@ -23,7 +23,7 @@ public sealed class MySqlCharacterTransferCommitTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migration in new[] { "001_identity_and_leases.sql", "003_character_lease_transfers.sql", "005_character_transfer_decisions.sql" })
+            foreach (var migration in new[] { "001_identity_and_leases.sql", "003_character_lease_transfers.sql", "005_character_transfer_decisions.sql", "008_character_tombstones.sql" })
             {
                 var path = Path.Combine(AppContext.BaseDirectory, "db", "migrations", migration);
                 foreach (var statement in (await File.ReadAllTextAsync(path))
@@ -44,7 +44,8 @@ public sealed class MySqlCharacterTransferCommitTests
                     INSERT INTO accounts VALUES (@account, 'test@example.invalid', 'TEST@EXAMPLE.INVALID',
                         'unused-test-hash', 'active', @now, @now);
                     INSERT INTO gateway_sessions VALUES (@session, @account, @hash, @now, @now, @expiry, NULL);
-                    INSERT INTO characters VALUES (73, @account, 'TransferTest', @now, @now);
+                    INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
+                    VALUES (73, @account, 'TransferTest', @now, @now);
                     INSERT INTO character_leases VALUES (73, @session, 'source-01', @hash, 14, @expiry);
                     """;
                 seed.Parameters.AddWithValue("@account", account.ToString("D"));

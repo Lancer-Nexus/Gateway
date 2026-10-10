@@ -37,7 +37,7 @@ public sealed partial class MySqlAccountRepository
         await using (var characterLock = connection.CreateCommand())
         {
             characterLock.Transaction = transaction;
-            characterLock.CommandText = "SELECT character_id FROM characters WHERE character_id=@character FOR UPDATE";
+            characterLock.CommandText = "SELECT character_id FROM characters WHERE character_id=@character AND deleted_at_utc IS NULL FOR UPDATE";
             characterLock.Parameters.AddWithValue("@character", binding.CharacterId);
             if (await characterLock.ExecuteScalarAsync(cancellationToken) is null)
                 return new(false, "character_not_found");
