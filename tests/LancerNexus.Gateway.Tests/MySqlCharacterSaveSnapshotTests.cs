@@ -25,7 +25,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql", "007_character_identity_allocation.sql" })
+            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql" })
             {
                 var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
                     "db", "migrations", migrationName));
@@ -60,12 +60,21 @@ public sealed class MySqlCharacterSaveSnapshotTests
                 await seed.ExecuteNonQueryAsync();
             }
 
+            var allocationMigration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
+                "db", "migrations", "007_character_identity_allocation.sql"));
+            foreach (var statement in allocationMigration.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                await using var schema = connection.CreateCommand();
+                schema.CommandText = statement;
+                await schema.ExecuteNonQueryAsync();
+            }
+
             var token1 = Enumerable.Repeat((byte)1, 32).ToArray();
             var token2 = Enumerable.Repeat((byte)2, 32).ToArray();
             var leases = new MySqlAccountRepository(databaseConfig.ConnectionString);
             var identity = await leases.ResolveCharacterIdentityAsync(account, session, "ResolvedPilot", now);
             var identityRetry = await leases.ResolveCharacterIdentityAsync(account, session, "ResolvedPilot", now);
-            Assert.True(identity.Accepted);
+            Assert.True(identity.Accepted, identity.ReasonCode);
             Assert.Equal("resolved", identity.ReasonCode);
             Assert.True(identity.CharacterId > 73);
             Assert.Equal(identity.CharacterId, identityRetry.CharacterId);

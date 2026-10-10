@@ -592,19 +592,28 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         }
 
         long characterId;
+        await using (var allocate = connection.CreateCommand())
+        {
+            allocate.Transaction = transaction;
+            allocate.CommandText = "INSERT INTO gateway_character_id_allocator () VALUES ();";
+            await allocate.ExecuteNonQueryAsync(cancellationToken);
+            characterId = allocate.LastInsertedId;
+        }
         await using (var insert = connection.CreateCommand())
         {
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO characters (account_id, display_name, created_at_utc, updated_at_utc)
-                VALUES (@account_id, @display_name, @now_utc, @now_utc)
+                INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
+                VALUES (@character_id, @account_id, @display_name, @now_utc, @now_utc)
                 ON DUPLICATE KEY UPDATE character_id = LAST_INSERT_ID(character_id);
                 """;
+            insert.Parameters.AddWithValue("@character_id", characterId);
             insert.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
             insert.Parameters.AddWithValue("@display_name", displayName);
             insert.Parameters.AddWithValue("@now_utc", nowUtc);
             await insert.ExecuteNonQueryAsync(cancellationToken);
-            characterId = insert.LastInsertedId;
+            if (insert.LastInsertedId > 0)
+                characterId = insert.LastInsertedId;
         }
 
         var belongsToAccount = false;
@@ -613,8 +622,13 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             owner.Transaction = transaction;
             owner.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
             owner.Parameters.AddWithValue("@character_id", characterId);
-            belongsToAccount = string.Equals(await owner.ExecuteScalarAsync(cancellationToken) as string,
-                accountId.ToString("D"), StringComparison.OrdinalIgnoreCase);
+            var ownerId = await owner.ExecuteScalarAsync(cancellationToken);
+            belongsToAccount = ownerId switch
+            {
+                Guid value => value == accountId,
+                string value => string.Equals(value, accountId.ToString("D"), StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
         }
         await transaction.CommitAsync(cancellationToken);
         return belongsToAccount
