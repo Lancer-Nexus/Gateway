@@ -62,12 +62,28 @@ public sealed class TransferSourceFreezeServiceTests
     }
 
     [Fact]
+    public async Task ZeroLeaseVersionCannotStageOrFreezeSnapshot()
+    {
+        var coordinator = new FakeCoordinator(TransferState.Prepared);
+        var snapshots = new FakeSnapshotStore();
+        var service = new TransferSourceFreezeService(coordinator, new FakeAccounts(), snapshots, TimeProvider.System);
+
+        var result = await service.MarkFrozenAsync(coordinator.TransferId, "li01-instance", 0,
+            new byte[] { 1, 2, 3 });
+
+        Assert.False(result.Accepted);
+        Assert.Equal("transfer_lease_version_invalid", result.ReasonCode);
+        Assert.Equal(0, coordinator.MarkSourceFrozenCalls);
+        Assert.Equal(0, snapshots.StoredCount);
+    }
+
+    [Fact]
     public async Task OnlyBoundTargetCanRetrieveSnapshotAfterSourceFreeze()
     {
         var coordinator = new FakeCoordinator(TransferState.SourceFrozen);
         var snapshots = new FakeSnapshotStore();
         await snapshots.StoreAsync(new TransferSnapshotMetadata(coordinator.TransferId, "li01-instance",
-            "li02-instance", 73, 0, DateTime.UtcNow), new byte[] { 4, 5, 6 });
+            "li02-instance", 73, 4, DateTime.UtcNow), new byte[] { 4, 5, 6 });
         var service = new TransferSnapshotReadService(coordinator, snapshots);
 
         var wrongTarget = await service.ReadForTargetAsync(coordinator.TransferId, "li03-instance");

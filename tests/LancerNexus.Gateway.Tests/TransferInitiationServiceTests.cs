@@ -71,6 +71,22 @@ public sealed class TransferInitiationServiceTests
     }
 
     [Fact]
+    public async Task Start_RejectsZeroVersionSourceLeaseWithoutCallingCoordinator()
+    {
+        var now = DateTime.UtcNow;
+        var request = Request(now);
+        var coordinator = new StubCoordinatorTransferClient(accepted: true);
+        var service = CreateService(
+            new StubAccountRepository(new CharacterLeaseRecord("li01-instance", 0, now.AddMinutes(4))),
+            coordinator, TicketOptions(), now);
+
+        var result = await service.StartAsync(request, Session(request.SessionId));
+
+        Assert.Equal(TransferInitiationFailure.ActiveLeaseUnavailable, result.Failure);
+        Assert.Null(coordinator.LastPrepare);
+    }
+
+    [Fact]
     public async Task Start_RejectsSessionMismatchBeforeReadingLease()
     {
         var now = DateTime.UtcNow;

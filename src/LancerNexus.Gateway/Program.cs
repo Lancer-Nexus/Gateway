@@ -886,7 +886,7 @@ app.MapPost("/api/v1/game/freeze-transfer/{transferId:guid}", async (
     if (!string.Equals(context.Request.ContentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase))
         return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
     if (!long.TryParse(context.Request.Headers["X-Lancer-Nexus-Lease-Version"], NumberStyles.None,
-            CultureInfo.InvariantCulture, out var expectedLeaseVersion) || expectedLeaseVersion < 0)
+            CultureInfo.InvariantCulture, out var expectedLeaseVersion) || expectedLeaseVersion <= 0)
         return Results.BadRequest(new { error = "transfer_lease_version_invalid" });
     context.Response.Headers.CacheControl = "no-store";
     if (context.Request.ContentLength > TransferSnapshotLimits.MaxBytes)

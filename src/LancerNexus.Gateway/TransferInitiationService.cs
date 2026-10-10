@@ -68,7 +68,7 @@ public sealed class TransferInitiationService(
 
         var lease = await accounts.FindActiveCharacterLeaseAsync(
             accountId, sessionId, request.CharacterId, now, cancellationToken);
-        if (lease is null || lease.LeaseVersion < 0 || lease.ValidUntilUtc <= now ||
+        if (lease is null || lease.LeaseVersion <= 0 || lease.ValidUntilUtc <= now ||
             string.IsNullOrWhiteSpace(lease.InstanceId) ||
             (!string.IsNullOrWhiteSpace(request.TargetInstanceId) &&
              string.Equals(lease.InstanceId, request.TargetInstanceId, StringComparison.Ordinal)) ||
@@ -115,7 +115,7 @@ public sealed class TransferInitiationService(
 
         var confirmedLease = await accounts.FindActiveCharacterLeaseAsync(
             accountId, sessionId, request.CharacterId, now, cancellationToken);
-        if (confirmedLease is null || confirmedLease.ValidUntilUtc <= now ||
+        if (confirmedLease is null || confirmedLease.LeaseVersion <= 0 || confirmedLease.ValidUntilUtc <= now ||
             confirmedLease.LeaseVersion != lease.LeaseVersion ||
             !string.Equals(confirmedLease.InstanceId, lease.InstanceId, StringComparison.Ordinal) ||
             (authenticatedSourceInstanceId is not null &&

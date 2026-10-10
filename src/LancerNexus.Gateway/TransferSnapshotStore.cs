@@ -55,7 +55,7 @@ public sealed class MySqlTransferSnapshotStore(
     {
         if (metadata.TransferId == Guid.Empty || string.IsNullOrWhiteSpace(metadata.SourceInstanceId) ||
             string.IsNullOrWhiteSpace(metadata.TargetInstanceId) || metadata.CharacterId <= 0 ||
-            metadata.LeaseVersion < 0 || snapshot.Length is 0 or > TransferSnapshotLimits.MaxBytes)
+            metadata.LeaseVersion <= 0 || snapshot.Length is 0 or > TransferSnapshotLimits.MaxBytes)
             return new(TransferSnapshotStoreStatus.Conflict);
         if (!protection.TryProtect(metadata.TransferId, snapshot.Span, out var keyId, out var encrypted))
             return new(TransferSnapshotStoreStatus.Unavailable);

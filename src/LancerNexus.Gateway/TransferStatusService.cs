@@ -55,7 +55,7 @@ public sealed class TransferStatusService(ICoordinatorTransferClient coordinator
                 binding.SessionId != transfer.Request.SessionId || binding.CharacterId != transfer.Request.CharacterId ||
                 binding.SourceInstanceId != transfer.Request.SourceInstanceId ||
                 binding.TargetInstanceId != transfer.Request.TargetInstanceId ||
-                binding.ExpectedLeaseVersion < 0 || binding.ExpectedLeaseVersion == long.MaxValue ||
+                binding.ExpectedLeaseVersion <= 0 || binding.ExpectedLeaseVersion == long.MaxValue ||
                 state is TransferState.Committed or TransferState.SourceReleased)
                 return new(null, TransferSourceReleaseFailure.PersistenceInvalidResponse,
                     "character_transfer_abort_mismatch");
@@ -69,7 +69,7 @@ public sealed class TransferStatusService(ICoordinatorTransferClient coordinator
                 committed.CharacterId != transfer.Request.CharacterId ||
                 !string.Equals(committed.SourceInstanceId, transfer.Request.SourceInstanceId, StringComparison.Ordinal) ||
                 !string.Equals(committed.TargetInstanceId, transfer.Request.TargetInstanceId, StringComparison.Ordinal) ||
-                committed.ExpectedLeaseVersion < 0 || committed.ExpectedLeaseVersion == long.MaxValue ||
+                committed.ExpectedLeaseVersion <= 0 || committed.ExpectedLeaseVersion == long.MaxValue ||
                 committed.CommittedLeaseVersion != committed.ExpectedLeaseVersion + 1 ||
                 state is not (TransferState.SourceFrozen or TransferState.TargetAccepted or
                     TransferState.Committed or TransferState.SourceReleased) ||

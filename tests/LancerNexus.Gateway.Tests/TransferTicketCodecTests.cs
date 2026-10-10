@@ -61,10 +61,20 @@ public sealed class TransferTicketCodecTests
         Assert.Contains("claims are invalid", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Issue_RejectsZeroSourceLeaseVersion()
+    {
+        var claims = Claims(DateTime.UtcNow, leaseVersion: 0);
+
+        var error = Assert.Throws<ArgumentException>(() => CreateCodec().Issue(claims));
+
+        Assert.Contains("claims are invalid", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static TransferTicketCodec CreateCodec() => new(new TransferTicketOptions(
         new string('t', 32), "gateway-transfer-01", "game-server-transfer"));
 
-    private static TransferTicketClaims Claims(DateTime now, TimeSpan? lifetime = null) => new()
+    private static TransferTicketClaims Claims(DateTime now, TimeSpan? lifetime = null, long leaseVersion = 14) => new()
     {
         TransferId = Guid.NewGuid(),
         SessionId = Guid.NewGuid(),
@@ -73,7 +83,7 @@ public sealed class TransferTicketCodecTests
         SourceInstanceId = "li01-instance",
         TargetInstanceId = "li02-instance",
         TargetSystemId = "li02",
-        LeaseVersion = 14,
+        LeaseVersion = leaseVersion,
         IssuedAtUtc = now,
         ExpiresAtUtc = now.Add(lifetime ?? TimeSpan.FromMinutes(1)),
         Nonce = "nonce-01",

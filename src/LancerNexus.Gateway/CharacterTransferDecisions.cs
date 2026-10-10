@@ -24,7 +24,7 @@ public sealed partial class MySqlAccountRepository
         DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         if (binding.TransferId == Guid.Empty || binding.SessionId == Guid.Empty || binding.CharacterId <= 0 ||
-            binding.ExpectedLeaseVersion < 0 || binding.ExpectedLeaseVersion == long.MaxValue ||
+            binding.ExpectedLeaseVersion <= 0 || binding.ExpectedLeaseVersion == long.MaxValue ||
             string.IsNullOrWhiteSpace(binding.SourceInstanceId) || string.IsNullOrWhiteSpace(binding.TargetInstanceId) ||
             binding.SourceInstanceId.Length > 96 || binding.TargetInstanceId.Length > 96 ||
             binding.SourceInstanceId == binding.TargetInstanceId)

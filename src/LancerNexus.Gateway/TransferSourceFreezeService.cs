@@ -37,7 +37,9 @@ public sealed class TransferSourceFreezeService(
     {
         if (transferId == Guid.Empty || string.IsNullOrWhiteSpace(authenticatedSourceInstanceId))
             return Reject(transferId, "transfer_source_freeze_request_invalid");
-        if (expectedLeaseVersion < 0 || snapshotBytes.Length is 0 or > TransferSnapshotLimits.MaxBytes)
+        if (expectedLeaseVersion <= 0)
+            return Reject(transferId, "transfer_lease_version_invalid");
+        if (snapshotBytes.Length is 0 or > TransferSnapshotLimits.MaxBytes)
             return Reject(transferId, "transfer_snapshot_size_invalid");
 
         var lookup = await coordinator.GetTransferAsync(transferId, cancellationToken);
@@ -73,7 +75,7 @@ public sealed class TransferSourceFreezeService(
             return Fail(transferId, TransferSourceFreezeFailure.PersistenceUnavailable,
                 "character_lease_persistence_unavailable");
         }
-        if (lease is null || lease.ValidUntilUtc <= timeProvider.GetUtcNow().UtcDateTime ||
+        if (lease is null || lease.LeaseVersion <= 0 || lease.ValidUntilUtc <= timeProvider.GetUtcNow().UtcDateTime ||
             lease.LeaseVersion != expectedLeaseVersion ||
             !string.Equals(lease.InstanceId, authenticatedSourceInstanceId, StringComparison.Ordinal))
             return Reject(transferId, "source_lease_changed");
@@ -142,7 +144,7 @@ public sealed class TransferSnapshotReadService(
         var metadata = stored.Record.Metadata;
         if (!string.Equals(metadata.SourceInstanceId, transfer.Request.SourceInstanceId, StringComparison.Ordinal) ||
             !string.Equals(metadata.TargetInstanceId, transfer.Request.TargetInstanceId, StringComparison.Ordinal) ||
-            metadata.CharacterId != transfer.Request.CharacterId)
+            metadata.CharacterId != transfer.Request.CharacterId || metadata.LeaseVersion <= 0)
         {
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(stored.Record.Snapshot);
             return new(TransferSnapshotStoreStatus.Unavailable);

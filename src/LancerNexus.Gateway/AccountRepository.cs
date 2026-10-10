@@ -953,7 +953,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         CancellationToken cancellationToken = default)
     {
         if (transferId == Guid.Empty || sessionId == Guid.Empty || characterId <= 0 ||
-            expectedLeaseVersion < 0 || expectedLeaseVersion == long.MaxValue ||
+            expectedLeaseVersion <= 0 || expectedLeaseVersion == long.MaxValue ||
             string.IsNullOrWhiteSpace(sourceInstanceId) ||
             string.IsNullOrWhiteSpace(targetInstanceId) ||
             sourceInstanceId.Length > 96 || targetInstanceId.Length > 96 ||

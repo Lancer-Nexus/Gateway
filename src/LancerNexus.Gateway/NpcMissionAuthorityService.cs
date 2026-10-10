@@ -37,7 +37,7 @@ public sealed class NpcMissionAuthorityService(ICoordinatorTransferClient coordi
                 committed.SessionId != previous.Binding.SessionId || committed.CharacterId != previous.Binding.CharacterId ||
                 committed.SourceInstanceId != request.SourceInstanceId || committed.TargetInstanceId != request.TargetInstanceId ||
                 committed.ExpectedLeaseVersion != previous.Binding.ExpectedLeaseVersion ||
-                committed.ExpectedLeaseVersion < 0 || committed.ExpectedLeaseVersion == long.MaxValue ||
+                committed.ExpectedLeaseVersion <= 0 || committed.ExpectedLeaseVersion == long.MaxValue ||
                 committed.CommittedLeaseVersion != committed.ExpectedLeaseVersion + 1 ||
                 transfer.State is not (TransferState.SourceFrozen or TransferState.TargetAccepted or
                     TransferState.Committed or TransferState.SourceReleased))

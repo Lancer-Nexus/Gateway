@@ -76,7 +76,7 @@ public sealed class TransferTicketCodec(TransferTicketOptions options)
         bool allowExpired = false)
     {
         if (claims.TransferId == Guid.Empty || claims.SessionId == Guid.Empty || claims.AccountId == Guid.Empty ||
-            claims.CharacterId <= 0 || claims.LeaseVersion < 0 ||
+            claims.CharacterId <= 0 || claims.LeaseVersion <= 0 ||
             string.IsNullOrWhiteSpace(claims.SourceInstanceId) ||
             string.IsNullOrWhiteSpace(claims.TargetInstanceId) ||
             string.Equals(claims.SourceInstanceId, claims.TargetInstanceId, StringComparison.Ordinal) ||
