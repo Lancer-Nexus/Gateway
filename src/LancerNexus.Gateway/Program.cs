@@ -99,6 +99,7 @@ builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<JoinTicketReplayStore>();
 builder.Services.AddTransient<CharacterLeaseAcquisitionService>();
+builder.Services.AddTransient<CharacterLeaseRenewalService>();
 builder.Services.AddSingleton<ITransferTicketReplayStore>(services => services.GetRequiredService<JoinTicketReplayStore>());
 var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(transferTicketOptions);
@@ -169,7 +170,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -355,6 +356,24 @@ app.MapPost("/api/v1/game/acquire-character-lease", async (
         _ => Results.BadRequest(result)
     };
 });
+
+app.MapPost("/api/v1/game/renew-character-lease", async (
+    CharacterLeaseRenewRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    CharacterLeaseRenewalService renewal,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_lease_renewal" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    var result = await renewal.RenewAsync(request, instanceId, cancellationToken);
+    if (!result.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    if (result.Accepted) return Results.Ok(result);
+    return result.ReasonCode == "character_lease_persistence_unavailable"
+        ? Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        : Results.Conflict(result);
+}).RequireRateLimiting("character-snapshot");
 
 app.MapPost("/api/v1/game/characters/resolve-identity", async (
     CharacterIdentityResolveRequestV1 request,

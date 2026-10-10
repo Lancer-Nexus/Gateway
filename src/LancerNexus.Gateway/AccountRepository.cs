@@ -69,6 +69,10 @@ public interface IAccountRepository
         long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
         byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default);
+    Task<CharacterLeaseAcquireResult> RenewCharacterLeaseAsync(long characterId, string instanceId,
+        byte[] leaseTokenHash, long leaseVersion, DateTime validUntilUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character lease renewal is not configured.");
 }
 
 public sealed class AccountRepositoryNotConfigured : IAccountRepository, ICharacterLeaseAcquisitionStore
@@ -128,6 +132,11 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository, ICharac
     public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
         long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
         byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterLeaseAcquireResult> RenewCharacterLeaseAsync(long characterId, string instanceId,
+        byte[] leaseTokenHash, long leaseVersion, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 }
@@ -262,6 +271,38 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
 
         await transaction.CommitAsync(cancellationToken);
         return new(true, "acquired", 1, validUntilUtc);
+    }
+
+    public async Task<CharacterLeaseAcquireResult> RenewCharacterLeaseAsync(long characterId, string instanceId,
+        byte[] leaseTokenHash, long leaseVersion, DateTime validUntilUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (characterId <= 0 || !AdminQuery.ValidIdentifier(instanceId) || leaseTokenHash.Length != 32 ||
+            leaseVersion <= 0 || validUntilUtc <= nowUtc)
+            return new(false, "lease_request_invalid", null, null);
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE character_leases l
+            INNER JOIN gateway_sessions s ON s.session_id = l.session_id
+            INNER JOIN accounts a ON a.account_id = s.account_id
+            SET l.valid_until_utc = @valid_until_utc
+            WHERE l.character_id = @character_id AND l.instance_id = @instance_id
+              AND l.lease_version = @lease_version AND l.lease_token_hash = @lease_token_hash
+              AND l.valid_until_utc > @now_utc AND s.revoked_at_utc IS NULL
+              AND s.expires_at_utc > @now_utc AND a.status = 'active';
+            """;
+        command.Parameters.AddWithValue("@valid_until_utc", validUntilUtc);
+        command.Parameters.AddWithValue("@character_id", characterId);
+        command.Parameters.AddWithValue("@instance_id", instanceId);
+        command.Parameters.AddWithValue("@lease_version", leaseVersion);
+        command.Parameters.AddWithValue("@lease_token_hash", leaseTokenHash);
+        command.Parameters.AddWithValue("@now_utc", nowUtc);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+            return new(false, "character_lease_rejected", null, null);
+        return new(true, "renewed", leaseVersion, validUntilUtc);
     }
 
     private static async Task<CharacterLeaseAcquireResult> RejectAcquireAsync(MySqlTransaction transaction,

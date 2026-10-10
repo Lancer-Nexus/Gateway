@@ -71,6 +71,15 @@ public sealed class MySqlCharacterSaveSnapshotTests
             Assert.Equal(identity.CharacterId, identityRetry.CharacterId);
             Assert.True((await leases.AcquireCharacterLeaseAsync(account, session, 73, "li-01",
                 SHA256.HashData(token1), now.AddMinutes(15), now)).Accepted);
+            var renewedLease = await leases.RenewCharacterLeaseAsync(73, "li-01", SHA256.HashData(token1),
+                1, now.AddMinutes(30), now.AddMinutes(1));
+            Assert.True(renewedLease.Accepted);
+            Assert.Equal("renewed", renewedLease.ReasonCode);
+            Assert.Equal(1, renewedLease.LeaseVersion);
+            var staleRenewal = await leases.RenewCharacterLeaseAsync(73, "li-01", SHA256.HashData(token2),
+                1, now.AddMinutes(30), now.AddMinutes(1));
+            Assert.False(staleRenewal.Accepted);
+            Assert.Equal("character_lease_rejected", staleRenewal.ReasonCode);
             var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
