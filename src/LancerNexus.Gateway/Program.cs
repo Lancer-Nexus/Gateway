@@ -13,6 +13,7 @@ var eventRegistrationRateLimit = ReadPositiveLimit(builder.Configuration,
     "Gateway:EventRegistrationRateLimitPerMinute", 10);
 var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
 var transferStatusRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferStatusRateLimitPerMinute", 120);
+var characterSnapshotRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:CharacterSnapshotRateLimitPerMinute", 120);
 var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:SessionRefreshRateLimitPerMinute", 120);
 builder.Services.AddRateLimiter(options =>
 {
@@ -75,6 +76,15 @@ builder.Services.AddRateLimiter(options =>
             QueueLimit = 0,
             AutoReplenishment = true
         }));
+    options.AddPolicy("character-snapshot", context => RateLimitPartition.GetFixedWindowLimiter(
+        TransferRateLimitPartition.GetKey(context),
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = characterSnapshotRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
 });
 var coordinatorOptions = CoordinatorGatewayOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(coordinatorOptions);
@@ -125,6 +135,12 @@ builder.Services.AddSingleton<IAccountRepository>(_ =>
         : new MySqlAccountRepository(gatewayConnectionString));
 builder.Services.AddSingleton<ICharacterLeaseAcquisitionStore>(services =>
     (ICharacterLeaseAcquisitionStore)services.GetRequiredService<IAccountRepository>());
+builder.Services.AddSingleton<ICharacterSaveSnapshotStore>(services =>
+    string.IsNullOrWhiteSpace(gatewayConnectionString)
+        ? new CharacterSaveSnapshotStoreNotConfigured()
+        : new MySqlCharacterSaveSnapshotStore(gatewayConnectionString,
+            services.GetRequiredService<TransferSnapshotProtection>()));
+builder.Services.AddTransient<CharacterSaveSnapshotService>();
 if (!string.IsNullOrWhiteSpace(gatewayConnectionString))
     builder.Services.AddHostedService<ExpiredSessionCleanupService>();
 builder.Services.AddSingleton<TransferSnapshotProtection>();
@@ -153,7 +169,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_lease_acquire_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_lease_acquire_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -339,6 +355,48 @@ app.MapPost("/api/v1/game/acquire-character-lease", async (
         _ => Results.BadRequest(result)
     };
 });
+
+app.MapPost("/api/v1/game/characters/snapshot/write", async (
+    CharacterSaveSnapshotWriteRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    CharacterSaveSnapshotService snapshots,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_snapshot_request" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    var result = await snapshots.WriteAsync(request, instanceId, cancellationToken);
+    if (!result.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    if (result.Accepted) return Results.Ok(result);
+    return result.ReasonCode switch
+    {
+        "character_lease_rejected" => Results.Conflict(result),
+        "character_not_found" => Results.NotFound(result),
+        "snapshot_persistence_unavailable" => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Conflict(result)
+    };
+}).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/api/v1/game/characters/snapshot/read", async (
+    CharacterSaveSnapshotReadRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    CharacterSaveSnapshotService snapshots,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_snapshot_request" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    var result = await snapshots.ReadAsync(request, instanceId, cancellationToken);
+    return result.Status switch
+    {
+        CharacterSaveSnapshotReadStatus.Found => Results.Ok(result.Snapshot),
+        CharacterSaveSnapshotReadStatus.LeaseRejected => Results.Conflict(),
+        CharacterSaveSnapshotReadStatus.NotFound => Results.NotFound(),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+}).RequireRateLimiting("character-snapshot");
 
 app.MapPost("/api/v1/game/admin/commands", async (GameAdminQueryRequest request,
     GameInstanceKeyAuthenticator instances, AdminQueryRelay relay, HttpContext context, CancellationToken ct) =>

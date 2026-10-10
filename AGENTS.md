@@ -9,6 +9,7 @@ Provide a secure, stateless-capable entry point between clients and the internal
 - Gateway owns identity, short-lived tokens and the MySQL-backed character-persistence boundary. Coordinator owns placement and reservations; game instances own live simulation.
 - Gateway initiates idempotent transfers using `Requested -> Reserved -> Prepared -> SourceFrozen -> TargetAccepted -> Committed -> SourceReleased`. The source stays authoritative until the lease changes atomically at `Committed`.
 - Character writes require a monotonic MySQL `lease_version` fencing token; Redis is only transient session, chat and presence distribution.
+- Durable Freelancer SaveGame persistence belongs to Gateway/MySQL. Store opaque versioned payloads encrypted at rest; every read and write must validate the current instance, active account/session, lease token hash and `lease_version` under the character-row lock. Writes advance one snapshot revision at a time; identical retries are idempotent. The game instance remains the live simulation owner and must not claim full persistence integration until its normal load/save lifecycle uses these routes.
 - Gateway uses versioned `Protocol` contracts and capabilities. It never delegates password handling or authoritative placement to a game instance.
 
 ## Rules
