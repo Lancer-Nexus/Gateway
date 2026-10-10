@@ -80,12 +80,19 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
             Assert.False(competing.Accepted);
             Assert.Equal("lease_owned", competing.ReasonCode);
 
-            await using (var expire = connection.CreateCommand())
-            {
-                expire.CommandText = "UPDATE character_leases SET valid_until_utc = @expired WHERE character_id = 73";
-                expire.Parameters.AddWithValue("@expired", now.AddSeconds(-1));
-                await expire.ExecuteNonQueryAsync();
-            }
+            var wrongOwner = await repository.ReleaseCharacterLeaseAsync(73, secondSession, "liberty-02",
+                Enumerable.Repeat((byte)2, 32).ToArray(), 1, now);
+            Assert.False(wrongOwner.Released);
+            Assert.Equal("lease_mismatch", wrongOwner.ReasonCode);
+
+            var released = await repository.ReleaseCharacterLeaseAsync(73, firstSession, "liberty-01",
+                firstHash, 1, now);
+            Assert.True(released.Released);
+            Assert.Equal("released", released.ReasonCode);
+            var duplicateRelease = await repository.ReleaseCharacterLeaseAsync(73, firstSession, "liberty-01",
+                firstHash, 1, now);
+            Assert.True(duplicateRelease.Released);
+            Assert.Equal("duplicate", duplicateRelease.ReasonCode);
 
             var takeover = await repository.AcquireCharacterLeaseAsync(account, secondSession, 73,
                 "liberty-02", Enumerable.Repeat((byte)2, 32).ToArray(), now.AddMinutes(15), now);
@@ -97,6 +104,10 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
                 "liberty-01", firstHash, now.AddMinutes(15), now);
             Assert.False(staleOwner.Accepted);
             Assert.Equal("lease_owned", staleOwner.ReasonCode);
+            var staleRelease = await repository.ReleaseCharacterLeaseAsync(73, firstSession, "liberty-01",
+                firstHash, 1, now.AddMinutes(1));
+            Assert.False(staleRelease.Released);
+            Assert.Equal("lease_mismatch", staleRelease.ReasonCode);
             var current = await repository.FindActiveCharacterTargetLeaseAsync(73, now);
             Assert.Equal("liberty-02", current?.InstanceId);
             Assert.Equal(2, current?.LeaseVersion);

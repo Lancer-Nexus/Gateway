@@ -99,6 +99,7 @@ builder.Services.AddSingleton(joinTicketOptions);
 builder.Services.AddSingleton<JoinTicketCodec>();
 builder.Services.AddSingleton<JoinTicketReplayStore>();
 builder.Services.AddTransient<CharacterLeaseAcquisitionService>();
+builder.Services.AddTransient<CharacterLeaseReleaseService>();
 builder.Services.AddTransient<CharacterLeaseRenewalService>();
 builder.Services.AddSingleton<ITransferTicketReplayStore>(services => services.GetRequiredService<JoinTicketReplayStore>());
 var transferTicketOptions = TransferTicketOptions.FromConfiguration(builder.Configuration);
@@ -353,6 +354,28 @@ app.MapPost("/api/v1/game/acquire-character-lease", async (
         "lease_owned" => Results.Conflict(result),
         "character_lease_persistence_unavailable" or "lease_lifetime_configuration_invalid" =>
             Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        _ => Results.BadRequest(result)
+    };
+});
+
+app.MapPost("/api/v1/game/release-character-lease", async (
+    CharacterLeaseReleaseRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    CharacterLeaseReleaseService release,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_lease_release_request" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+
+    var result = await release.ReleaseAsync(request, instanceId, cancellationToken);
+    if (!result.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    if (result.Released) return Results.Ok(result);
+    return result.ReasonCode switch
+    {
+        "lease_persistence_unavailable" => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        "lease_mismatch" or "lease_not_found" => Results.Conflict(result),
         _ => Results.BadRequest(result)
     };
 });

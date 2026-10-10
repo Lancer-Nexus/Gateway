@@ -60,6 +60,29 @@ public sealed class CharacterLeaseAcquisitionServiceTests
         Assert.Equal(73, store.CharacterId);
     }
 
+    [Fact]
+    public async Task ReleaseUsesAuthenticatedInstanceAndHashesExactLeaseToken()
+    {
+        var store = new LeaseStore(new(true, "acquired", 1, Now.AddMinutes(15)));
+        var service = new CharacterLeaseReleaseService(store, new FixedTimeProvider(Now));
+        var request = new CharacterLeaseReleaseRequestV1
+        {
+            CorrelationId = Guid.NewGuid(), CharacterId = 73, SessionId = Guid.NewGuid(),
+            LeaseToken = LeaseToken, LeaseVersion = 4
+        };
+
+        var result = await service.ReleaseAsync(request, "liberty-01");
+
+        Assert.True(result.Released);
+        Assert.Equal(request.CorrelationId, result.CorrelationId);
+        Assert.Equal(4, result.LeaseVersion);
+        Assert.Equal("liberty-01", store.ReleaseInstanceId);
+        Assert.Equal(request.SessionId, store.ReleaseSessionId);
+        Assert.Equal(73, store.ReleaseCharacterId);
+        Assert.Equal(4, store.ReleaseLeaseVersion);
+        Assert.Equal(System.Security.Cryptography.SHA256.HashData(TokenBytes), store.ReleaseTokenHash);
+    }
+
     private static CharacterLeaseAcquisitionService Service(LeaseStore store)
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -105,6 +128,11 @@ public sealed class CharacterLeaseAcquisitionServiceTests
         public string? InstanceId { get; private set; }
         public byte[]? LeaseTokenHash { get; private set; }
         public int Calls { get; private set; }
+        public string? ReleaseInstanceId { get; private set; }
+        public Guid? ReleaseSessionId { get; private set; }
+        public long? ReleaseCharacterId { get; private set; }
+        public long? ReleaseLeaseVersion { get; private set; }
+        public byte[]? ReleaseTokenHash { get; private set; }
 
         public Task<CharacterLeaseAcquireResult> AcquireCharacterLeaseAsync(Guid accountId, Guid sessionId,
             long characterId, string instanceId, byte[] leaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
@@ -117,6 +145,18 @@ public sealed class CharacterLeaseAcquisitionServiceTests
             InstanceId = instanceId;
             LeaseTokenHash = leaseTokenHash;
             return Task.FromResult(result);
+        }
+
+        public Task<CharacterLeaseReleaseResult> ReleaseCharacterLeaseAsync(long characterId, Guid sessionId,
+            string instanceId, byte[] leaseTokenHash, long leaseVersion, DateTime nowUtc,
+            CancellationToken cancellationToken = default)
+        {
+            ReleaseCharacterId = characterId;
+            ReleaseSessionId = sessionId;
+            ReleaseInstanceId = instanceId;
+            ReleaseTokenHash = leaseTokenHash;
+            ReleaseLeaseVersion = leaseVersion;
+            return Task.FromResult(new CharacterLeaseReleaseResult(true, "released", leaseVersion));
         }
     }
 
