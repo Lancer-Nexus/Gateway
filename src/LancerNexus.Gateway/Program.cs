@@ -360,23 +360,41 @@ app.MapPost("/api/v1/game/characters/resolve-identity", async (
     CharacterIdentityResolveRequestV1 request,
     GameInstanceKeyAuthenticator instances,
     IAccountRepository accounts,
+    JoinTicketCodec joinTickets,
+    JoinTicketOptions ticketOptions,
     HttpContext context,
     TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
     context.Response.Headers.CacheControl = "no-store";
     if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_identity_request" });
-    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
     try
     {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
         var result = await accounts.ResolveCharacterIdentityAsync(request.AccountId, request.SessionId,
-            request.DisplayName, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+            request.DisplayName, now, cancellationToken);
         if (result.Accepted)
         {
+            var expires = now.Add(ticketOptions.Lifetime);
+            var leaseTicket = joinTickets.Issue(new JoinTicketClaims
+            {
+                SessionId = request.SessionId,
+                AccountId = request.AccountId,
+                CharacterId = result.CharacterId,
+                InstanceId = instanceId,
+                SystemId = "character-selection",
+                Endpoint = "lease-acquisition",
+                IssuedAtUtc = now,
+                ExpiresAtUtc = expires,
+                Nonce = Guid.NewGuid().ToString("N"),
+                Audience = ticketOptions.Audience,
+                KeyId = ticketOptions.KeyId
+            });
             var response = new CharacterIdentityResolveResultV1
             {
                 CorrelationId = request.CorrelationId, Accepted = true,
-                ReasonCode = result.ReasonCode, CharacterId = result.CharacterId
+                ReasonCode = result.ReasonCode, CharacterId = result.CharacterId, LeaseTicket = leaseTicket
             };
             return response.IsValid() ? Results.Ok(response) : Results.StatusCode(StatusCodes.Status502BadGateway);
         }
