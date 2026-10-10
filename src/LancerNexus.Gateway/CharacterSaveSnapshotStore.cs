@@ -11,6 +11,7 @@ public enum CharacterSaveSnapshotStoreStatus
     Duplicate,
     Conflict,
     LeaseRejected,
+    SessionRejected,
     NotFound,
     Unavailable
 }
@@ -29,6 +30,14 @@ public interface ICharacterSaveSnapshotStore
     Task<CharacterSaveSnapshotStoreResult> ReadAsync(string instanceId, ReadOnlyMemory<byte> leaseTokenHash,
         CharacterSaveSnapshotReadRequestV1 request, DateTime nowUtc,
         CancellationToken cancellationToken = default);
+
+    Task<CharacterSaveSnapshotStoreResult> BootstrapAsync(CharacterBootstrapRequestV1 request, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
+
+    Task<CharacterSaveSnapshotStoreResult> ReadPreviewAsync(CharacterSnapshotPreviewRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
 }
 
 public sealed class CharacterSaveSnapshotStoreNotConfigured : ICharacterSaveSnapshotStore
@@ -42,6 +51,14 @@ public sealed class CharacterSaveSnapshotStoreNotConfigured : ICharacterSaveSnap
         CharacterSaveSnapshotReadRequestV1 request, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
+
+    public Task<CharacterSaveSnapshotStoreResult> BootstrapAsync(CharacterBootstrapRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
+
+    public Task<CharacterSaveSnapshotStoreResult> ReadPreviewAsync(CharacterSnapshotPreviewRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
 }
 
 /// <summary>Stores opaque SaveGame payloads only while the caller holds the active, fenced character lease.</summary>
@@ -49,6 +66,127 @@ public sealed class MySqlCharacterSaveSnapshotStore(
     string connectionString,
     TransferSnapshotProtection protection) : ICharacterSaveSnapshotStore
 {
+    public async Task<CharacterSaveSnapshotStoreResult> BootstrapAsync(CharacterBootstrapRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (!request.IsValid()) return new(CharacterSaveSnapshotStoreStatus.Conflict);
+        var hash = SHA256.HashData(request.Payload);
+        var associatedData = AssociatedData(request.CharacterId, 1);
+        if (!protection.TryProtect(associatedData, request.Payload, out var keyId, out var protectedSnapshot))
+        {
+            CryptographicOperations.ZeroMemory(hash);
+            CryptographicOperations.ZeroMemory(associatedData);
+            return new(CharacterSaveSnapshotStoreStatus.Unavailable);
+        }
+        try
+        {
+            await using var connection = new MySqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            if (!await LockCharacterAsync(connection, transaction, request.AccountId, request.CharacterId,
+                    cancellationToken))
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.NotFound, cancellationToken);
+            if (!await HasActiveSessionAsync(connection, transaction, request.AccountId, request.SessionId,
+                    nowUtc, cancellationToken))
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.SessionRejected, cancellationToken);
+            var existing = await ReadRevisionForUpdateAsync(connection, transaction, request.CharacterId,
+                cancellationToken);
+            if (existing is not null)
+            {
+                CryptographicOperations.ZeroMemory(existing.Value.Hash);
+                await transaction.RollbackAsync(cancellationToken);
+                return new(CharacterSaveSnapshotStoreStatus.Duplicate, 1);
+            }
+            if (await HasAnyLeaseAsync(connection, transaction, request.CharacterId, cancellationToken))
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.LeaseRejected, cancellationToken);
+
+            await using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = """
+                    INSERT INTO character_save_snapshots
+                        (character_id, snapshot_revision, lease_version, schema_version, key_id,
+                         snapshot_hash, protected_snapshot, updated_at_utc)
+                    VALUES (@character, 1, 1, 1, @key_id, @hash, @snapshot, @updated_at);
+                    """;
+                insert.Parameters.AddWithValue("@character", request.CharacterId);
+                insert.Parameters.AddWithValue("@key_id", keyId);
+                insert.Parameters.AddWithValue("@hash", hash);
+                insert.Parameters.AddWithValue("@snapshot", protectedSnapshot);
+                insert.Parameters.AddWithValue("@updated_at", nowUtc);
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return new(CharacterSaveSnapshotStoreStatus.Stored, 1);
+        }
+        catch (MySqlException)
+        {
+            return new(CharacterSaveSnapshotStoreStatus.Unavailable);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(hash);
+            CryptographicOperations.ZeroMemory(associatedData);
+            CryptographicOperations.ZeroMemory(protectedSnapshot);
+        }
+    }
+
+    public async Task<CharacterSaveSnapshotStoreResult> ReadPreviewAsync(CharacterSnapshotPreviewRequestV1 request,
+        DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (!request.IsValid()) return new(CharacterSaveSnapshotStoreStatus.Conflict);
+        try
+        {
+            await using var connection = new MySqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            if (!await LockCharacterAsync(connection, transaction, request.AccountId, request.CharacterId,
+                    cancellationToken))
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.NotFound, cancellationToken);
+            if (!await HasActiveSessionAsync(connection, transaction, request.AccountId, request.SessionId,
+                    nowUtc, cancellationToken))
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.SessionRejected, cancellationToken);
+            var stored = await ReadSnapshotAsync(connection, transaction, request.CharacterId, cancellationToken);
+            if (stored is null)
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.NotFound, cancellationToken);
+            var associatedData = AssociatedData(request.CharacterId, stored.Value.Revision);
+            if (!protection.TryUnprotect(associatedData, stored.Value.KeyId, stored.Value.ProtectedSnapshot,
+                    out var payload))
+            {
+                CryptographicOperations.ZeroMemory(associatedData);
+                CryptographicOperations.ZeroMemory(stored.Value.Hash);
+                CryptographicOperations.ZeroMemory(stored.Value.ProtectedSnapshot);
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.Unavailable, cancellationToken);
+            }
+            var hash = SHA256.HashData(payload);
+            var valid = payload.Length <= CharacterSaveSnapshotWriteRequestV1.MaxPayloadBytes &&
+                        CryptographicOperations.FixedTimeEquals(hash, stored.Value.Hash);
+            CryptographicOperations.ZeroMemory(hash);
+            CryptographicOperations.ZeroMemory(associatedData);
+            CryptographicOperations.ZeroMemory(stored.Value.Hash);
+            CryptographicOperations.ZeroMemory(stored.Value.ProtectedSnapshot);
+            if (!valid)
+            {
+                CryptographicOperations.ZeroMemory(payload);
+                return await RollbackAsync(transaction, CharacterSaveSnapshotStoreStatus.Unavailable, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return new(CharacterSaveSnapshotStoreStatus.Stored, stored.Value.Revision,
+                new CharacterSaveSnapshotV1
+                {
+                    CorrelationId = request.CorrelationId,
+                    CharacterId = request.CharacterId,
+                    LeaseVersion = stored.Value.LeaseVersion,
+                    Revision = stored.Value.Revision,
+                    Payload = payload
+                });
+        }
+        catch (MySqlException)
+        {
+            return new(CharacterSaveSnapshotStoreStatus.Unavailable);
+        }
+    }
+
     public async Task<CharacterSaveSnapshotStoreResult> WriteAsync(string instanceId,
         ReadOnlyMemory<byte> leaseTokenHash, CharacterSaveSnapshotWriteRequestV1 request,
         DateTime nowUtc, CancellationToken cancellationToken = default)
@@ -203,6 +341,45 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "SELECT character_id FROM characters WHERE character_id = @character AND deleted_at_utc IS NULL FOR UPDATE;";
+        command.Parameters.AddWithValue("@character", characterId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    private static async Task<bool> LockCharacterAsync(MySqlConnection connection, MySqlTransaction transaction,
+        Guid accountId, long characterId, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT character_id FROM characters WHERE account_id = @account AND character_id = @character AND deleted_at_utc IS NULL FOR UPDATE;";
+        command.Parameters.AddWithValue("@account", accountId.ToString("D"));
+        command.Parameters.AddWithValue("@character", characterId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    private static async Task<bool> HasActiveSessionAsync(MySqlConnection connection, MySqlTransaction transaction,
+        Guid accountId, Guid sessionId, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT s.session_id FROM gateway_sessions s
+            INNER JOIN accounts a ON a.account_id = s.account_id
+            WHERE s.session_id = @session AND s.account_id = @account
+              AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now AND a.status = 'active'
+            FOR UPDATE;
+            """;
+        command.Parameters.AddWithValue("@session", sessionId.ToString("D"));
+        command.Parameters.AddWithValue("@account", accountId.ToString("D"));
+        command.Parameters.AddWithValue("@now", nowUtc);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    private static async Task<bool> HasAnyLeaseAsync(MySqlConnection connection, MySqlTransaction transaction,
+        long characterId, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT character_id FROM character_leases WHERE character_id = @character FOR UPDATE;";
         command.Parameters.AddWithValue("@character", characterId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }

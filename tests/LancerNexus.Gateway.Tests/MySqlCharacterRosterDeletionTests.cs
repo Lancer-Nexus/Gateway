@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using LancerNexus.Gateway;
 using LancerNexus.Protocol;
+using Microsoft.Extensions.Configuration;
 using MySqlConnector;
 using Xunit;
 
@@ -57,7 +59,8 @@ public sealed class MySqlCharacterRosterDeletionTests
                     INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
                     VALUES (73, @account, 'InUsePilot', @now, @now),
                            (74, @account, 'TransferringPilot', @now, @now),
-                           (75, @account, 'DeletedPilot', @now, @now);
+                           (75, @account, 'DeletedPilot', @now, @now),
+                           (76, @account, 'BootstrapPilot', @now, @now);
                     INSERT INTO character_leases
                         (character_id, session_id, instance_id, lease_token_hash, lease_version, valid_until_utc)
                     VALUES (73, @session, 'source-01', @hash, 1, @expiry);
@@ -94,13 +97,53 @@ public sealed class MySqlCharacterRosterDeletionTests
                 (await repository.ResolveCharacterIdentityAsync(account, session, "DeletedPilot", now)).ReasonCode);
             var roster = await repository.ListActiveCharactersForSessionAsync(account, session, now);
             Assert.True(roster.SessionAccepted);
-            Assert.Equal(new long[] { 73, 74 }, roster.Characters.Select(character => character.CharacterId));
+            Assert.Equal(new long[] { 73, 74, 76 }, roster.Characters.Select(character => character.CharacterId));
             Assert.False((await repository.ListActiveCharactersForSessionAsync(account, Guid.NewGuid(), now)).SessionAccepted);
 
             var reacquire = await repository.AcquireCharacterLeaseAsync(account, session, 75, "target-01",
                 new byte[32], now.AddMinutes(5), now);
             Assert.False(reacquire.Accepted);
             Assert.Equal("character_not_found", reacquire.ReasonCode);
+
+            var encryptionKey = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+            var protection = new TransferSnapshotProtection(new ConfigurationBuilder().AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Gateway:TransferSnapshotCurrentKeyId"] = "roster-test-key",
+                    ["Gateway:TransferSnapshotKeys:roster-test-key"] = Convert.ToBase64String(encryptionKey)
+                }).Build());
+            var snapshots = new MySqlCharacterSaveSnapshotStore(databaseConfig.ConnectionString, protection);
+            var bootstrapPayload = "Pilot SaveGame"u8.ToArray();
+            var bootstrap = new CharacterBootstrapRequestV1
+            {
+                CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session,
+                CharacterId = 76, Payload = bootstrapPayload
+            };
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored,
+                (await snapshots.BootstrapAsync(bootstrap, now)).Status);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Duplicate,
+                (await snapshots.BootstrapAsync(bootstrap with { Payload = [9, 9] }, now)).Status);
+            var previewRequest = new CharacterSnapshotPreviewRequestV1
+            {
+                CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session, CharacterId = 76
+            };
+            var preview = await snapshots.ReadPreviewAsync(previewRequest, now);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, preview.Status);
+            Assert.Equal(bootstrapPayload, preview.Snapshot!.Payload);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.SessionRejected,
+                (await snapshots.ReadPreviewAsync(previewRequest with { SessionId = Guid.NewGuid() }, now)).Status);
+
+            var leaseToken = Enumerable.Repeat((byte)3, 32).ToArray();
+            Assert.True((await repository.AcquireCharacterLeaseAsync(account, session, 76, "target-01",
+                SHA256.HashData(leaseToken), now.AddMinutes(5), now)).Accepted);
+            var bootstrappedRead = await snapshots.ReadAsync("target-01", SHA256.HashData(leaseToken),
+                new CharacterSaveSnapshotReadRequestV1
+                {
+                    CorrelationId = Guid.NewGuid(), CharacterId = 76, LeaseToken = Encode(leaseToken), LeaseVersion = 1
+                }, now);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, bootstrappedRead.Status);
+            Assert.Equal(bootstrapPayload, bootstrappedRead.Snapshot!.Payload);
+
             await using var history = connection.CreateCommand();
             history.CommandText = "SELECT COUNT(*) FROM character_save_snapshots WHERE character_id = 75;";
             Assert.Equal(1L, Convert.ToInt64(await history.ExecuteScalarAsync()));
@@ -117,6 +160,8 @@ public sealed class MySqlCharacterRosterDeletionTests
     {
         CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session, CharacterId = characterId
     };
+
+    private static string Encode(byte[] token) => Convert.ToBase64String(token).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private sealed class MySqlFactAttribute : FactAttribute
     {

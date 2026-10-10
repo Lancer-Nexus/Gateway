@@ -447,6 +447,69 @@ app.MapPost("/api/v1/game/characters/delete", async (
     }
 }).RequireRateLimiting("character-snapshot");
 
+app.MapPost("/api/v1/game/characters/bootstrap", async (
+    CharacterBootstrapRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    ICharacterSaveSnapshotStore snapshots,
+    HttpContext context,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_bootstrap_request" });
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    var stored = await snapshots.BootstrapAsync(request, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+    var response = new CharacterBootstrapResultV1
+    {
+        CorrelationId = request.CorrelationId,
+        Accepted = stored.Status is CharacterSaveSnapshotStoreStatus.Stored or CharacterSaveSnapshotStoreStatus.Duplicate,
+        ReasonCode = stored.Status switch
+        {
+            CharacterSaveSnapshotStoreStatus.Stored => "stored",
+            CharacterSaveSnapshotStoreStatus.Duplicate => "duplicate",
+            CharacterSaveSnapshotStoreStatus.SessionRejected => "session_rejected",
+            CharacterSaveSnapshotStoreStatus.NotFound => "character_not_found",
+            CharacterSaveSnapshotStoreStatus.LeaseRejected => "character_in_use",
+            CharacterSaveSnapshotStoreStatus.Conflict => "snapshot_conflict",
+            _ => "unavailable"
+        }
+    };
+    if (!response.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    return stored.Status switch
+    {
+        CharacterSaveSnapshotStoreStatus.Stored or CharacterSaveSnapshotStoreStatus.Duplicate => Results.Ok(response),
+        CharacterSaveSnapshotStoreStatus.SessionRejected => Results.Unauthorized(),
+        CharacterSaveSnapshotStoreStatus.NotFound => Results.NotFound(response),
+        CharacterSaveSnapshotStoreStatus.LeaseRejected or CharacterSaveSnapshotStoreStatus.Conflict => Results.Conflict(response),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+}).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/api/v1/game/characters/snapshot/preview", async (
+    CharacterSnapshotPreviewRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    ICharacterSaveSnapshotStore snapshots,
+    HttpContext context,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_snapshot_preview_request" });
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    var result = await snapshots.ReadPreviewAsync(request, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+    if (result.Status == CharacterSaveSnapshotStoreStatus.Stored &&
+        result.Snapshot is { } snapshot && snapshot.IsValid() && snapshot.CorrelationId == request.CorrelationId &&
+        snapshot.CharacterId == request.CharacterId)
+        return Results.Ok(snapshot);
+    return result.Status switch
+    {
+        CharacterSaveSnapshotStoreStatus.NotFound => Results.NotFound(),
+        CharacterSaveSnapshotStoreStatus.SessionRejected => Results.Unauthorized(),
+        CharacterSaveSnapshotStoreStatus.Unavailable => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Conflict()
+    };
+}).RequireRateLimiting("character-snapshot");
+
 app.MapPost("/api/v1/game/characters/resolve-identity", async (
     CharacterIdentityResolveRequestV1 request,
     GameInstanceKeyAuthenticator instances,
