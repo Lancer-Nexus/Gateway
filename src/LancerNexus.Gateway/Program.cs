@@ -169,7 +169,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_lease_acquire_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
 }));
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
@@ -355,6 +355,44 @@ app.MapPost("/api/v1/game/acquire-character-lease", async (
         _ => Results.BadRequest(result)
     };
 });
+
+app.MapPost("/api/v1/game/characters/resolve-identity", async (
+    CharacterIdentityResolveRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    IAccountRepository accounts,
+    HttpContext context,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_identity_request" });
+    if (!instances.TryAuthenticate(context.Request, out _)) return Results.Unauthorized();
+    try
+    {
+        var result = await accounts.ResolveCharacterIdentityAsync(request.AccountId, request.SessionId,
+            request.DisplayName, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+        if (result.Accepted)
+        {
+            var response = new CharacterIdentityResolveResultV1
+            {
+                CorrelationId = request.CorrelationId, Accepted = true,
+                ReasonCode = result.ReasonCode, CharacterId = result.CharacterId
+            };
+            return response.IsValid() ? Results.Ok(response) : Results.StatusCode(StatusCodes.Status502BadGateway);
+        }
+        return result.ReasonCode switch
+        {
+            "session_rejected" => Results.Unauthorized(),
+            "character_name_conflict" => Results.Conflict(new { error = result.ReasonCode }),
+            "character_identity_invalid" => Results.BadRequest(new { error = result.ReasonCode }),
+            _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        };
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException or OperationCanceledException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("character-snapshot");
 
 app.MapPost("/api/v1/game/characters/snapshot/write", async (
     CharacterSaveSnapshotWriteRequestV1 request,

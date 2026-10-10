@@ -25,7 +25,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql" })
+            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql", "007_character_identity_allocation.sql" })
             {
                 var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
                     "db", "migrations", migrationName));
@@ -63,6 +63,12 @@ public sealed class MySqlCharacterSaveSnapshotTests
             var token1 = Enumerable.Repeat((byte)1, 32).ToArray();
             var token2 = Enumerable.Repeat((byte)2, 32).ToArray();
             var leases = new MySqlAccountRepository(databaseConfig.ConnectionString);
+            var identity = await leases.ResolveCharacterIdentityAsync(account, session, "ResolvedPilot", now);
+            var identityRetry = await leases.ResolveCharacterIdentityAsync(account, session, "ResolvedPilot", now);
+            Assert.True(identity.Accepted);
+            Assert.Equal("resolved", identity.ReasonCode);
+            Assert.True(identity.CharacterId > 73);
+            Assert.Equal(identity.CharacterId, identityRetry.CharacterId);
             Assert.True((await leases.AcquireCharacterLeaseAsync(account, session, 73, "li-01",
                 SHA256.HashData(token1), now.AddMinutes(15), now)).Accepted);
             var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();

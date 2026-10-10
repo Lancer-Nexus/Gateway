@@ -12,6 +12,7 @@ public sealed record AccountRecord(
 
 public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
 public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
+public sealed record CharacterIdentityResolveStoreResult(bool Accepted, string ReasonCode, long? CharacterId);
 public sealed record CharacterLeaseRecord(string InstanceId, long LeaseVersion, DateTime ValidUntilUtc);
 public sealed record CharacterLeaseAcquireResult(bool Accepted, string ReasonCode, long? LeaseVersion,
     DateTime? ValidUntilUtc);
@@ -52,6 +53,9 @@ public interface IAccountRepository
         Task.FromResult(0);
     Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default);
+    Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId, Guid sessionId,
+        string displayName, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Character identity resolution is not configured.");
     Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
         CancellationToken cancellationToken = default);
     Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(Guid accountId, Guid sessionId, long characterId,
@@ -98,6 +102,10 @@ public sealed class AccountRepositoryNotConfigured : IAccountRepository, ICharac
 
     public Task<IReadOnlyList<CharacterRecord>> ListCharactersAsync(Guid accountId,
         CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Gateway account persistence is not configured.");
+
+    public Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId, Guid sessionId,
+        string displayName, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Gateway account persistence is not configured.");
 
     public Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
@@ -508,6 +516,69 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         while (await reader.ReadAsync(cancellationToken))
             characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
         return characters;
+    }
+
+    public async Task<CharacterIdentityResolveStoreResult> ResolveCharacterIdentityAsync(Guid accountId,
+        Guid sessionId, string displayName, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        if (accountId == Guid.Empty || sessionId == Guid.Empty || string.IsNullOrWhiteSpace(displayName) ||
+            displayName.Length > 96 || displayName != displayName.Trim() || displayName.Any(char.IsControl))
+            return new(false, "character_identity_invalid", null);
+
+        await using var connection = new MySqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var session = connection.CreateCommand())
+        {
+            session.Transaction = transaction;
+            session.CommandText = """
+                SELECT s.session_id
+                FROM gateway_sessions s
+                INNER JOIN accounts a ON a.account_id = s.account_id
+                WHERE s.session_id = @session_id AND s.account_id = @account_id
+                  AND s.revoked_at_utc IS NULL AND s.expires_at_utc > @now_utc
+                  AND a.status = 'active'
+                FOR UPDATE;
+                """;
+            session.Parameters.AddWithValue("@session_id", sessionId.ToString("D"));
+            session.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
+            session.Parameters.AddWithValue("@now_utc", nowUtc);
+            if (await session.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new(false, "session_rejected", null);
+            }
+        }
+
+        long characterId;
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO characters (account_id, display_name, created_at_utc, updated_at_utc)
+                VALUES (@account_id, @display_name, @now_utc, @now_utc)
+                ON DUPLICATE KEY UPDATE character_id = LAST_INSERT_ID(character_id);
+                """;
+            insert.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
+            insert.Parameters.AddWithValue("@display_name", displayName);
+            insert.Parameters.AddWithValue("@now_utc", nowUtc);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+            characterId = insert.LastInsertedId;
+        }
+
+        var belongsToAccount = false;
+        await using (var owner = connection.CreateCommand())
+        {
+            owner.Transaction = transaction;
+            owner.CommandText = "SELECT account_id FROM characters WHERE character_id = @character_id FOR UPDATE;";
+            owner.Parameters.AddWithValue("@character_id", characterId);
+            belongsToAccount = string.Equals(await owner.ExecuteScalarAsync(cancellationToken) as string,
+                accountId.ToString("D"), StringComparison.OrdinalIgnoreCase);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return belongsToAccount
+            ? new(true, "resolved", characterId)
+            : new(false, "character_name_conflict", null);
     }
 
     public async Task<CharacterRecord?> FindCharacterAsync(Guid accountId, long characterId,
