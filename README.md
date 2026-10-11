@@ -12,6 +12,8 @@ The Gateway is the public entry point for the Lancer Nexus MMO client. It authen
 
 `GET /api/v1/market/catalog/goods` provides the complete seeded goods list, including goods without a current offer. It supports `pageSize` (1–500), `afterGoodId` and `expectedCatalogRevision`; continuation pages pin the seed SHA-256 revision. A changed catalog returns `409 Conflict`. The response uses a public cache and page-specific `ETag` and the same read rate limit.
 
+`GET /api/v1/market/markets/{marketId}/goods/{goodId}?systemId=...` reads one exact offer row. Optional `expectedSystemRevision` and `expectedMarketRevision` query values make stale views return `409 Conflict`; an absent offer returns `404`. A found row includes both revisions, receives a short public cache lifetime and revision-specific `ETag`, and shares the market read rate limit. The endpoint is informational and does not authorize trades.
+
 `GET /api/v1/market/markets/{marketId}/quote` requires an active bearer session and query values `characterId`, `systemId`, `goodId`, `side` (`buy` or `sell`) and `quantity` (1–1,000,000). Gateway verifies character ownership and the live session, then Coordinator reads reputation at that exact saved-snapshot revision and quotes the shared market row. V1 changes each marginal unit price by 10% per full reputation point (buy discount, sell premium), bounded to ±10%; the response includes the used faction, reputation and market revisions, policy version and 15-second expiry. `Cache-Control: no-store` applies. The preview reserves neither stock nor credits; a future trade reservation must revalidate both revisions.
 
 System market snapshots return reputation-neutral market rows. Trade booking and Coordinator reservation calls are not yet exposed by Gateway.

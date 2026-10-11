@@ -39,6 +39,32 @@ public sealed class CoordinatorMarketClientTests
     }
 
     [Fact]
+    public async Task ReadGood_ForwardsExactMarketIdentityAndRevisionPins()
+    {
+        using var handler = new GoodHandler();
+        using var httpClient = new HttpClient(handler);
+        var apiKey = new string('k', 32);
+        var client = new CoordinatorMarketClient(httpClient,
+            new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), apiKey,
+                TimeSpan.FromSeconds(5)));
+        var request = new MarketGoodReadRequestV1
+        {
+            CorrelationId = Guid.NewGuid(), SystemId = "li-01", MarketId = "li01_base",
+            GoodId = "commodity_food", ExpectedSystemRevision = 7, ExpectedMarketRevision = 3
+        };
+
+        var result = await client.ReadGoodAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.NotNull(result.Good);
+        Assert.True(result.Good!.IsValidFor(request));
+        Assert.Equal(request, handler.ForwardedRequest);
+        Assert.Equal("Bearer", handler.Authorization?.Scheme);
+        Assert.Equal(apiKey, handler.Authorization?.Parameter);
+        Assert.Equal("https://coordinator.example/internal/v1/market/goods/read", handler.RequestUri?.ToString());
+    }
+
+    [Fact]
     public async Task ReadCatalog_UsesPrivateCoordinatorCredentialAndValidatesRevisionPinnedResponse()
     {
         using var handler = new CatalogHandler();
@@ -209,6 +235,37 @@ public sealed class CoordinatorMarketClientTests
                 PricingPolicyVersion = 1
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(quote) };
+        }
+    }
+
+    private sealed class GoodHandler : HttpMessageHandler
+    {
+        public AuthenticationHeaderValue? Authorization { get; private set; }
+        public Uri? RequestUri { get; private set; }
+        public MarketGoodReadRequestV1? ForwardedRequest { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Authorization = request.Headers.Authorization;
+            RequestUri = request.RequestUri;
+            ForwardedRequest = await request.Content!.ReadFromJsonAsync<MarketGoodReadRequestV1>(cancellationToken);
+            var good = new MarketGoodSnapshotV1
+            {
+                MarketId = ForwardedRequest!.MarketId, SystemId = ForwardedRequest.SystemId,
+                GoodId = ForwardedRequest.GoodId, BaseUnitPrice = 100, CurrentUnitPrice = 110,
+                AvailableStock = 6, TargetStock = 10, BuyEnabled = true, SellEnabled = false,
+                MarketRevision = ForwardedRequest.ExpectedMarketRevision ?? 3
+            };
+            var response = new MarketGoodReadResponseV1
+            {
+                CorrelationId = ForwardedRequest.CorrelationId, SystemId = ForwardedRequest.SystemId,
+                MarketId = ForwardedRequest.MarketId, GoodId = ForwardedRequest.GoodId,
+                Status = MarketGoodReadStatusV1.Found,
+                SystemRevision = ForwardedRequest.ExpectedSystemRevision ?? 7,
+                MarketRevision = good.MarketRevision, Good = good
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
         }
     }
 }

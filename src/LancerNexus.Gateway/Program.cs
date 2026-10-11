@@ -184,7 +184,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1", "personal_market_quote_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1", "public_market_good_v1", "personal_market_quote_v1" }
 }));
 
 app.MapGet("/api/v1/market/catalog/goods", async (
@@ -217,6 +217,45 @@ app.MapGet("/api/v1/market/catalog/goods", async (
     if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
         return Results.StatusCode(StatusCodes.Status304NotModified);
     return Results.Ok(catalog);
+}).RequireRateLimiting("market-read");
+
+app.MapGet("/api/v1/market/markets/{marketId}/goods/{goodId}", async (
+    string marketId,
+    string goodId,
+    string? systemId,
+    long? expectedSystemRevision,
+    long? expectedMarketRevision,
+    CoordinatorMarketClient market,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    var request = new MarketGoodReadRequestV1
+    {
+        CorrelationId = Guid.NewGuid(),
+        SystemId = systemId ?? "",
+        MarketId = marketId,
+        GoodId = goodId,
+        ExpectedSystemRevision = expectedSystemRevision,
+        ExpectedMarketRevision = expectedMarketRevision
+    };
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_good_request" });
+
+    var result = await market.ReadGoodAsync(request, cancellationToken);
+    if (result.Good is not { } read || !read.IsValidFor(request))
+        return Results.StatusCode(result.StatusCode is null or HttpStatusCode.ServiceUnavailable
+            ? StatusCodes.Status503ServiceUnavailable
+            : StatusCodes.Status502BadGateway);
+    if (read.Status == MarketGoodReadStatusV1.RevisionMismatch)
+        return Results.Conflict(read);
+    if (read.Status == MarketGoodReadStatusV1.NotFound)
+        return Results.NotFound(read);
+
+    context.Response.Headers.CacheControl = "public, max-age=5";
+    context.Response.Headers.ETag = $"\"market-good-{read.SystemId}-{read.MarketId}-{read.GoodId}-{read.SystemRevision}-{read.MarketRevision}\"";
+    if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
+        return Results.StatusCode(StatusCodes.Status304NotModified);
+    return Results.Ok(read);
 }).RequireRateLimiting("market-read");
 
 app.MapGet("/api/v1/market/markets/{marketId}/quote", async (
