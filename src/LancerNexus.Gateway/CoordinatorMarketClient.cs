@@ -58,7 +58,7 @@ public sealed class CoordinatorMarketClient(HttpClient httpClient, CoordinatorGa
         {
             using var response = await httpClient.SendAsync(message, timeout.Token);
             if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Conflict or
-                HttpStatusCode.BadRequest))
+                HttpStatusCode.NotFound or HttpStatusCode.BadRequest or HttpStatusCode.ServiceUnavailable))
                 return new(response.StatusCode, null, "coordinator_market_reservation_rejected");
             var reservation = await response.Content
                 .ReadFromJsonAsync<MarketTradeQuoteReservationResponseV1>(timeout.Token);

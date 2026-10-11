@@ -25,7 +25,7 @@ public sealed class CoordinatorMarketClientTests
             SystemId = "li-01", GoodId = "commodity_food", Side = MarketTradeSideV1.Buy,
             Quantity = 2, ExpectedMarketRevision = 7, ExpectedReputationRevision = 9,
             ReputationPriceFactorPartsPerMillion = 950_000, ExpectedQuoteUnitPrice = 95,
-            ExpectedTotalPrice = 190
+            ExpectedTotalPrice = 190, CharacterId = 42, MarketFactionId = "li_grp"
         };
 
         var result = await client.ReserveQuoteAsync(request);
@@ -336,7 +336,8 @@ public sealed class CoordinatorMarketClientTests
                 MarketRevision = 8,
                 SystemRevision = 22,
                 ReputationRevision = ForwardedRequest.ExpectedReputationRevision,
-                ReputationPriceFactorPartsPerMillion = ForwardedRequest.ReputationPriceFactorPartsPerMillion
+                ReputationPriceFactorPartsPerMillion = ForwardedRequest.ReputationPriceFactorPartsPerMillion,
+                MarketFactionId = ForwardedRequest.MarketFactionId
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
         }
