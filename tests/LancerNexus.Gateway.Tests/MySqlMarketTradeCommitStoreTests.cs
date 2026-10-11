@@ -115,7 +115,10 @@ public sealed class MySqlMarketTradeCommitStoreTests
                 LeaseVersion = 4
             }, now);
             Assert.Equal(new byte[] { 3, 4, 5 }, read.Snapshot!.Payload);
-            var outbox = await store.ReadPendingOutboxAsync(10);
+            // A fresh store instance models the process losing all in-memory state
+            // after the Gateway commit and resuming from its durable outbox.
+            var restartedStore = new MySqlMarketTradeCommitStore(isolated.ConnectionString, protection);
+            var outbox = await restartedStore.ReadPendingOutboxAsync(10);
             var message = Assert.Single(outbox);
             Assert.Equal(request.TradeId, message.TradeId);
             Assert.Equal(request.CorrelationId, message.CorrelationId);
@@ -138,7 +141,7 @@ public sealed class MySqlMarketTradeCommitStoreTests
             var mismatch = await store.PrepareAsync("li-01", tokenHash,
                 request with { Snapshot = request.Snapshot with { Payload = [8, 9] } }, now);
             Assert.Equal(MarketTradeCommitStoreStatus.Conflict, mismatch.Status);
-            await store.MarkOutboxDeliveredAsync(request.TradeId, now);
+            await restartedStore.MarkOutboxDeliveredAsync(request.TradeId, now);
             Assert.Empty(await store.ReadPendingOutboxAsync(10));
             CryptographicOperations.ZeroMemory(tokenHash);
             CryptographicOperations.ZeroMemory(token);
