@@ -134,6 +134,14 @@ public sealed class MySqlCharacterSaveSnapshotTests
                     Assert.Equal("li_n_grp", item.FactionId);
                     Assert.Equal(0.625f, item.Value);
                 });
+            var leaseReputation = await store.ReadFactionReputationForLeaseAsync(
+                "li-01", hash1, 73, 1, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.Found, leaseReputation.Status);
+            Assert.Equal(reputation.ReputationRevision, leaseReputation.ReputationRevision);
+            Assert.Equal(reputation.Factions, leaseReputation.Factions);
+            var wrongInstanceReputation = await store.ReadFactionReputationForLeaseAsync(
+                "li-02", hash1, 73, 1, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.LeaseRejected, wrongInstanceReputation.Status);
             var otherAccount = await store.ReadFactionReputationAsync(Guid.NewGuid(), session, 73, now);
             Assert.Equal(CharacterFactionReputationReadStatus.NotFound, otherAccount.Status);
             var serviceRequest = new MarketFactionReputationReadRequestV1
@@ -162,8 +170,16 @@ public sealed class MySqlCharacterSaveSnapshotTests
 
             var stale = await store.WriteAsync("li-01", hash1, WriteRequest(token1, 1, 2, [40]), now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.LeaseRejected, stale.Status);
-            var current = await store.WriteAsync("li-02", SHA256.HashData(token2), WriteRequest(token2, 2, 2, [40]), now);
+            var staleLeaseReputation = await store.ReadFactionReputationForLeaseAsync(
+                "li-01", hash1, 73, 1, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.LeaseRejected, staleLeaseReputation.Status);
+            var current = await store.WriteAsync("li-02", SHA256.HashData(token2),
+                WriteRequest(token2, 2, 2, write.Payload), now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, current.Status);
+            var currentLeaseReputation = await store.ReadFactionReputationForLeaseAsync(
+                "li-02", SHA256.HashData(token2), 73, 2, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.Found, currentLeaseReputation.Status);
+            Assert.Equal(2, currentLeaseReputation.ReputationRevision);
 
             await using (var revoke = connection.CreateCommand())
             {
@@ -174,6 +190,9 @@ public sealed class MySqlCharacterSaveSnapshotTests
             }
             var revokedSession = await store.ReadFactionReputationAsync(account, session, 73, now);
             Assert.Equal(CharacterFactionReputationReadStatus.SessionRejected, revokedSession.Status);
+            var revokedLease = await store.ReadFactionReputationForLeaseAsync(
+                "li-02", SHA256.HashData(token2), 73, 2, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.LeaseRejected, revokedLease.Status);
         }
         finally
         {

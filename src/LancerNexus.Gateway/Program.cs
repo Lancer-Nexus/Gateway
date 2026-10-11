@@ -3,6 +3,7 @@ using LancerNexus.Protocol;
 using MySqlConnector;
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
 using System.Net.Sockets;
 using System.Threading.RateLimiting;
 
@@ -375,6 +376,73 @@ app.MapGet("/api/v1/market/markets/{marketId}/quote", async (
         MarketQuoteStatusV1.Rejected => Results.BadRequest(quote),
         _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
     };
+}).RequireRateLimiting("market-read");
+
+app.MapPost("/api/v1/game/characters/market-trades/quote", async (
+    MarketTradeQuoteReadRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    ICharacterSaveSnapshotStore snapshots,
+    CoordinatorMarketClient market,
+    TimeProvider timeProvider,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_trade_quote_request" });
+    if (!CharacterSaveSnapshotService.TryHashLeaseToken(request.LeaseToken, out var leaseTokenHash))
+        return Results.BadRequest(new { error = "invalid_market_trade_quote_request" });
+
+    try
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var reputation = await snapshots.ReadFactionReputationForLeaseAsync(instanceId, leaseTokenHash,
+            request.CharacterId, request.LeaseVersion, now, cancellationToken);
+        if (reputation.Status != CharacterFactionReputationReadStatus.Found ||
+            reputation.ReputationRevision is not { } reputationRevision)
+            return reputation.Status switch
+            {
+                CharacterFactionReputationReadStatus.LeaseRejected => Results.Conflict(new { error = "character_lease_rejected" }),
+                CharacterFactionReputationReadStatus.NotFound => Results.NotFound(),
+                CharacterFactionReputationReadStatus.InvalidRequest => Results.BadRequest(new { error = "invalid_character_id" }),
+                _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+            };
+
+        var quoteRequest = request.ToMarketQuoteRequest(reputationRevision);
+        if (!quoteRequest.IsValid())
+            return Results.BadRequest(new { error = "invalid_market_trade_quote_request" });
+        var result = await market.ReadQuoteAsync(quoteRequest, cancellationToken);
+        if (result.Quote is not { } quote || !quote.IsValidFor(quoteRequest))
+            return Results.StatusCode(result.StatusCode is null or HttpStatusCode.ServiceUnavailable
+                ? StatusCodes.Status503ServiceUnavailable
+                : StatusCodes.Status502BadGateway);
+        var response = new MarketTradeQuoteReadResponseV1
+        {
+            CorrelationId = request.CorrelationId,
+            CharacterId = request.CharacterId,
+            LeaseVersion = request.LeaseVersion,
+            ExpectedReputationRevision = reputationRevision,
+            Quote = quote
+        };
+        if (!response.IsValidFor(request))
+            return Results.StatusCode(StatusCodes.Status502BadGateway);
+        if (quote.Status == MarketQuoteStatusV1.Quoted && quote.ExpiresUtc <= timeProvider.GetUtcNow())
+            return Results.Conflict(new { error = "market_quote_expired" });
+        return quote.Status switch
+        {
+            MarketQuoteStatusV1.Quoted => Results.Ok(response),
+            MarketQuoteStatusV1.MarketRevisionMismatch or MarketQuoteStatusV1.ReputationRevisionMismatch =>
+                Results.Conflict(response),
+            MarketQuoteStatusV1.NotFound => Results.NotFound(response),
+            MarketQuoteStatusV1.Rejected => Results.BadRequest(response),
+            _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        };
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(leaseTokenHash);
+    }
 }).RequireRateLimiting("market-read");
 
 app.MapGet("/api/v1/market/systems/{systemId}/goods", async (

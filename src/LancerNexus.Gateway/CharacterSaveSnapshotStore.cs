@@ -35,6 +35,11 @@ public interface ICharacterSaveSnapshotStore
         long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
 
+    Task<CharacterFactionReputationReadResult> ReadFactionReputationForLeaseAsync(string instanceId,
+        ReadOnlyMemory<byte> leaseTokenHash, long characterId, long leaseVersion, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
+
     Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
         MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
@@ -64,6 +69,11 @@ public sealed class CharacterSaveSnapshotStoreNotConfigured : ICharacterSaveSnap
         long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
 
+    public Task<CharacterFactionReputationReadResult> ReadFactionReputationForLeaseAsync(string instanceId,
+        ReadOnlyMemory<byte> leaseTokenHash, long characterId, long leaseVersion, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
+
     public Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
         MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
@@ -84,7 +94,14 @@ public sealed class MySqlCharacterSaveSnapshotStore(
 {
     public Task<CharacterFactionReputationReadResult> ReadFactionReputationAsync(Guid accountId,
         Guid sessionId, long characterId, DateTime nowUtc, CancellationToken cancellationToken = default)
-        => ReadFactionReputationCoreAsync(accountId, sessionId, characterId, nowUtc, null, cancellationToken);
+        => ReadFactionReputationCoreAsync(accountId, sessionId, characterId, nowUtc, null, null, default, null,
+            cancellationToken);
+
+    public Task<CharacterFactionReputationReadResult> ReadFactionReputationForLeaseAsync(string instanceId,
+        ReadOnlyMemory<byte> leaseTokenHash, long characterId, long leaseVersion, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        ReadFactionReputationCoreAsync(null, null, characterId, nowUtc, null, instanceId, leaseTokenHash,
+            leaseVersion, cancellationToken);
 
     public async Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
         MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default)
@@ -92,15 +109,18 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         if (!request.IsValid())
             return new(CharacterFactionReputationReadStatus.InvalidRequest);
         return await ReadFactionReputationCoreAsync(null, null, request.CharacterId, DateTime.UtcNow,
-            request.ExpectedReputationRevision, cancellationToken);
+            request.ExpectedReputationRevision, null, default, null, cancellationToken);
     }
 
     private async Task<CharacterFactionReputationReadResult> ReadFactionReputationCoreAsync(Guid? accountId,
-        Guid? sessionId, long characterId, DateTime nowUtc, long? expectedRevision,
+        Guid? sessionId, long characterId, DateTime nowUtc, long? expectedRevision, string? instanceId,
+        ReadOnlyMemory<byte> leaseTokenHash, long? leaseVersion,
         CancellationToken cancellationToken)
     {
+        var leaseBound = instanceId is not null || leaseTokenHash.Length > 0 || leaseVersion is not null;
         if (characterId <= 0 || (accountId is null) != (sessionId is null) ||
-            accountId == Guid.Empty || sessionId == Guid.Empty || expectedRevision is <= 0)
+            accountId == Guid.Empty || sessionId == Guid.Empty || expectedRevision is <= 0 ||
+            (leaseBound && (!AdminQuery.ValidIdentifier(instanceId) || leaseTokenHash.Length != 32 || leaseVersion is not > 0)))
             return new(CharacterFactionReputationReadStatus.InvalidRequest);
         try
         {
@@ -113,7 +133,11 @@ public sealed class MySqlCharacterSaveSnapshotStore(
             if (!characterFound)
                 return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.NotFound,
                     cancellationToken);
-            if (accountId is { } sessionAccount && sessionId is { } activeSession &&
+            if (leaseBound && !await HasCurrentLeaseAsync(connection, transaction, instanceId!, leaseTokenHash,
+                    characterId, leaseVersion!.Value, nowUtc, cancellationToken))
+                return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.LeaseRejected,
+                    cancellationToken);
+            if (!leaseBound && accountId is { } sessionAccount && sessionId is { } activeSession &&
                 !await HasActiveSessionAsync(connection, transaction, sessionAccount, activeSession, nowUtc,
                     cancellationToken))
                 return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.SessionRejected,

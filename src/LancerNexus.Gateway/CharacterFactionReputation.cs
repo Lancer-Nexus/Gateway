@@ -12,6 +12,7 @@ public enum CharacterFactionReputationReadStatus
     RevisionMismatch,
     InvalidRequest,
     SessionRejected,
+    LeaseRejected,
     NotFound,
     Unavailable
 }
