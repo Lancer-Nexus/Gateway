@@ -184,7 +184,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1", "public_market_good_v1", "personal_market_quote_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1", "public_market_systems_v1", "public_market_good_v1", "personal_market_quote_v1" }
 }));
 
 app.MapGet("/api/v1/market/catalog/goods", async (
@@ -217,6 +217,38 @@ app.MapGet("/api/v1/market/catalog/goods", async (
     if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
         return Results.StatusCode(StatusCodes.Status304NotModified);
     return Results.Ok(catalog);
+}).RequireRateLimiting("market-read");
+
+app.MapGet("/api/v1/market/systems", async (
+    string? afterSystemId,
+    string? expectedCatalogRevision,
+    int? pageSize,
+    CoordinatorMarketClient market,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    var request = new MarketSystemsReadRequestV1
+    {
+        CorrelationId = Guid.NewGuid(),
+        AfterSystemId = afterSystemId,
+        ExpectedCatalogRevision = expectedCatalogRevision,
+        PageSize = pageSize ?? 100
+    };
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_systems_request" });
+    var result = await market.ReadSystemsAsync(request, cancellationToken);
+    if (result.Systems is not { } systems || !systems.IsValidFor(request))
+        return Results.StatusCode(result.StatusCode is null or HttpStatusCode.ServiceUnavailable
+            ? StatusCodes.Status503ServiceUnavailable
+            : StatusCodes.Status502BadGateway);
+    if (systems.Status == MarketCatalogReadStatusV1.RevisionExpired)
+        return Results.Conflict(systems);
+
+    context.Response.Headers.CacheControl = "public, max-age=60";
+    context.Response.Headers.ETag = $"\"market-systems-{systems.CatalogRevision}-{request.AfterSystemId ?? "first"}-{request.PageSize}\"";
+    if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
+        return Results.StatusCode(StatusCodes.Status304NotModified);
+    return Results.Ok(systems);
 }).RequireRateLimiting("market-read");
 
 app.MapGet("/api/v1/market/markets/{marketId}/goods/{goodId}", async (
