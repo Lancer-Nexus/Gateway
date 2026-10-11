@@ -35,6 +35,10 @@ public interface ICharacterSaveSnapshotStore
         long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
 
+    Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
+        MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
+
     Task<CharacterSaveSnapshotStoreResult> BootstrapAsync(CharacterBootstrapRequestV1 request, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
@@ -60,6 +64,10 @@ public sealed class CharacterSaveSnapshotStoreNotConfigured : ICharacterSaveSnap
         long characterId, DateTime nowUtc, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
 
+    public Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
+        MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new CharacterFactionReputationReadResult(CharacterFactionReputationReadStatus.Unavailable));
+
     public Task<CharacterSaveSnapshotStoreResult> BootstrapAsync(CharacterBootstrapRequestV1 request,
         DateTime nowUtc, CancellationToken cancellationToken = default) =>
         Task.FromResult(new CharacterSaveSnapshotStoreResult(CharacterSaveSnapshotStoreStatus.Unavailable));
@@ -74,20 +82,39 @@ public sealed class MySqlCharacterSaveSnapshotStore(
     string connectionString,
     TransferSnapshotProtection protection) : ICharacterSaveSnapshotStore
 {
-    public async Task<CharacterFactionReputationReadResult> ReadFactionReputationAsync(Guid accountId,
+    public Task<CharacterFactionReputationReadResult> ReadFactionReputationAsync(Guid accountId,
         Guid sessionId, long characterId, DateTime nowUtc, CancellationToken cancellationToken = default)
+        => ReadFactionReputationCoreAsync(accountId, sessionId, characterId, nowUtc, null, cancellationToken);
+
+    public async Task<CharacterFactionReputationReadResult> ReadFactionReputationForServiceAsync(
+        MarketFactionReputationReadRequestV1 request, CancellationToken cancellationToken = default)
     {
-        if (accountId == Guid.Empty || sessionId == Guid.Empty || characterId <= 0)
+        if (!request.IsValid())
+            return new(CharacterFactionReputationReadStatus.InvalidRequest);
+        return await ReadFactionReputationCoreAsync(null, null, request.CharacterId, DateTime.UtcNow,
+            request.ExpectedReputationRevision, cancellationToken);
+    }
+
+    private async Task<CharacterFactionReputationReadResult> ReadFactionReputationCoreAsync(Guid? accountId,
+        Guid? sessionId, long characterId, DateTime nowUtc, long? expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        if (characterId <= 0 || (accountId is null) != (sessionId is null) ||
+            accountId == Guid.Empty || sessionId == Guid.Empty || expectedRevision is <= 0)
             return new(CharacterFactionReputationReadStatus.InvalidRequest);
         try
         {
             await using var connection = new MySqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            if (!await LockCharacterAsync(connection, transaction, accountId, characterId, cancellationToken))
+            var characterFound = accountId is { } ownerAccount
+                ? await LockCharacterAsync(connection, transaction, ownerAccount, characterId, cancellationToken)
+                : await LockCharacterAsync(connection, transaction, characterId, cancellationToken);
+            if (!characterFound)
                 return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.NotFound,
                     cancellationToken);
-            if (!await HasActiveSessionAsync(connection, transaction, accountId, sessionId, nowUtc,
+            if (accountId is { } sessionAccount && sessionId is { } activeSession &&
+                !await HasActiveSessionAsync(connection, transaction, sessionAccount, activeSession, nowUtc,
                     cancellationToken))
                 return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.SessionRejected,
                     cancellationToken);
@@ -96,6 +123,11 @@ public sealed class MySqlCharacterSaveSnapshotStore(
             if (stored is null)
                 return await RollbackReputationAsync(transaction, CharacterFactionReputationReadStatus.NotFound,
                     cancellationToken);
+
+            if (expectedRevision is { } expected && expected != stored.Value.Revision)
+                return await RollbackReputationAsync(transaction,
+                    CharacterFactionReputationReadStatus.RevisionMismatch, cancellationToken,
+                    stored.Value.Revision);
 
             var associatedData = AssociatedData(characterId, stored.Value.Revision);
             try
@@ -576,10 +608,10 @@ public sealed class MySqlCharacterSaveSnapshotStore(
 
     private static async Task<CharacterFactionReputationReadResult> RollbackReputationAsync(
         MySqlTransaction transaction, CharacterFactionReputationReadStatus status,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, long? reputationRevision = null)
     {
         await transaction.RollbackAsync(cancellationToken);
-        return new(status);
+        return new(status, reputationRevision);
     }
 }
 

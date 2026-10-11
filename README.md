@@ -14,6 +14,8 @@ This endpoint returns reputation-neutral market rows. Personal quotes, the full 
 
 Authenticated `GET /api/v1/characters/{characterId}/faction-reputation` reads the character's saved `[Player] house` values from the latest Gateway-owned SaveGame snapshot. The bearer session must still be active in MySQL and the character must belong to that account. The response includes `reputationRevision`, which is the SaveGame snapshot revision; it does not claim to include simulation changes newer than the latest persisted snapshot. Missing faction entries use the game's neutral value `0`.
 
+Coordinator may read the same values through private HTTPS `POST /internal/v1/market/reputation/read`. Configure a dedicated `Gateway:CoordinatorMarketApiKey` and match it to `Coordinator:GatewayMarketApiKey`; keep it distinct from `Gateway:NpcMissionAuthorityApiKey`, game-instance keys and Coordinator inbound keys. The request may pin `expectedReputationRevision`; a mismatch returns `409` and no faction values. This service route is not a player API and must remain network-restricted.
+
 ## Responsibilities
 
 - E-mail and password login

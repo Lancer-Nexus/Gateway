@@ -9,6 +9,7 @@ public sealed record CharacterFactionReputationV1(string FactionId, float Value)
 public enum CharacterFactionReputationReadStatus
 {
     Found,
+    RevisionMismatch,
     InvalidRequest,
     SessionRejected,
     NotFound,

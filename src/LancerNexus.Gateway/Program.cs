@@ -119,6 +119,7 @@ builder.Services.AddSingleton<TransferTicketCodec>();
 builder.Services.AddTransient<TransferInitiationService>();
 builder.Services.AddTransient<TransferTicketAdmissionService>();
 builder.Services.AddSingleton<GameInstanceKeyAuthenticator>();
+builder.Services.AddSingleton<CoordinatorMarketAuthenticator>();
 builder.Services.AddHttpClient<AdminQueryRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<AdminActionRelay>(http => http.Timeout = TimeSpan.FromSeconds(8))
@@ -346,6 +347,51 @@ app.MapGet("/api/v1/characters/{characterId:long}/faction-reputation", async (
         _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
     };
 }).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/internal/v1/market/reputation/read", async (
+    MarketFactionReputationReadRequestV1 request,
+    CoordinatorMarketAuthenticator authentication,
+    ICharacterSaveSnapshotStore snapshots,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!authentication.IsConfigured)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authentication.TryAuthenticate(context.Request))
+        return Results.Unauthorized();
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_reputation_request" });
+
+    var stored = await snapshots.ReadFactionReputationForServiceAsync(request, cancellationToken);
+    var response = new MarketFactionReputationReadResponseV1
+    {
+        CorrelationId = request.CorrelationId,
+        CharacterId = request.CharacterId,
+        Status = stored.Status switch
+        {
+            CharacterFactionReputationReadStatus.Found => MarketFactionReputationStatusV1.Found,
+            CharacterFactionReputationReadStatus.RevisionMismatch => MarketFactionReputationStatusV1.RevisionMismatch,
+            CharacterFactionReputationReadStatus.NotFound => MarketFactionReputationStatusV1.NotFound,
+            _ => MarketFactionReputationStatusV1.Unavailable
+        },
+        ReputationRevision = stored.ReputationRevision ?? 0,
+        Factions = stored.Factions?.Select(faction => new MarketFactionReputationV1
+        {
+            FactionId = faction.FactionId,
+            Value = faction.Value
+        }).ToArray() ?? []
+    };
+    if (!response.IsValidFor(request))
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    return response.Status switch
+    {
+        MarketFactionReputationStatusV1.Found => Results.Ok(response),
+        MarketFactionReputationStatusV1.RevisionMismatch => Results.Conflict(response),
+        MarketFactionReputationStatusV1.NotFound => Results.NotFound(response),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+});
 
 app.MapPost("/api/v1/events/{eventId}/registrations", async (string eventId,
     GatewayEventRegistrationSubmission request, SessionTokenCodec sessionTokens,

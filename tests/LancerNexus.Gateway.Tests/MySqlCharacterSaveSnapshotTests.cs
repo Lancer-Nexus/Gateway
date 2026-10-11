@@ -136,6 +136,22 @@ public sealed class MySqlCharacterSaveSnapshotTests
                 });
             var otherAccount = await store.ReadFactionReputationAsync(Guid.NewGuid(), session, 73, now);
             Assert.Equal(CharacterFactionReputationReadStatus.NotFound, otherAccount.Status);
+            var serviceRequest = new MarketFactionReputationReadRequestV1
+            {
+                CorrelationId = Guid.NewGuid(),
+                CharacterId = 73,
+                ExpectedReputationRevision = 1
+            };
+            var serviceRead = await store.ReadFactionReputationForServiceAsync(serviceRequest);
+            Assert.Equal(CharacterFactionReputationReadStatus.Found, serviceRead.Status);
+            Assert.Equal(1, serviceRead.ReputationRevision);
+            var staleServiceRead = await store.ReadFactionReputationForServiceAsync(serviceRequest with
+            {
+                ExpectedReputationRevision = 2
+            });
+            Assert.Equal(CharacterFactionReputationReadStatus.RevisionMismatch, staleServiceRead.Status);
+            Assert.Equal(1, staleServiceRead.ReputationRevision);
+            Assert.Null(staleServiceRead.Factions);
 
             await using (var takeover = connection.CreateCommand())
             {
