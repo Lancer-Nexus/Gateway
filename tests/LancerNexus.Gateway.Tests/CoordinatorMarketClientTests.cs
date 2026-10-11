@@ -11,6 +11,28 @@ namespace LancerNexus.Gateway.Tests;
 public sealed class CoordinatorMarketClientTests
 {
     [Fact]
+    public async Task ReadCatalog_UsesPrivateCoordinatorCredentialAndValidatesRevisionPinnedResponse()
+    {
+        using var handler = new CatalogHandler();
+        using var httpClient = new HttpClient(handler);
+        var apiKey = new string('k', 32);
+        var client = new CoordinatorMarketClient(httpClient,
+            new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), apiKey,
+                TimeSpan.FromSeconds(5)));
+        var request = new MarketCatalogReadRequestV1 { CorrelationId = Guid.NewGuid(), PageSize = 2 };
+
+        var result = await client.ReadCatalogAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.NotNull(result.Catalog);
+        Assert.True(result.Catalog!.IsValidFor(request));
+        Assert.Equal("Bearer", handler.Authorization?.Scheme);
+        Assert.Equal(apiKey, handler.Authorization?.Parameter);
+        Assert.Equal("https://coordinator.example/internal/v1/market/catalog/read", handler.RequestUri?.ToString());
+        Assert.Equal(request.CorrelationId, handler.ForwardedRequest?.CorrelationId);
+    }
+
+    [Fact]
     public async Task ReadSystem_UsesPrivateCoordinatorCredentialAndValidatesPinnedPage()
     {
         using var handler = new MarketHandler();
@@ -96,6 +118,31 @@ public sealed class CoordinatorMarketClientTests
                         MarketRevision = 3
                     }
                 ]
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
+        }
+    }
+
+    private sealed class CatalogHandler : HttpMessageHandler
+    {
+        public AuthenticationHeaderValue? Authorization { get; private set; }
+        public Uri? RequestUri { get; private set; }
+        public MarketCatalogReadRequestV1? ForwardedRequest { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Authorization = request.Headers.Authorization;
+            RequestUri = request.RequestUri;
+            ForwardedRequest = JsonSerializer.Deserialize<MarketCatalogReadRequestV1>(
+                await request.Content!.ReadAsStringAsync(cancellationToken),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            var response = new MarketCatalogReadResponseV1
+            {
+                CorrelationId = ForwardedRequest!.CorrelationId,
+                Status = MarketCatalogReadStatusV1.Ok,
+                CatalogRevision = new string('a', 64),
+                Goods = [new MarketCatalogGoodV1 { GoodId = "commodity_food", Category = "commodity" }]
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
         }
