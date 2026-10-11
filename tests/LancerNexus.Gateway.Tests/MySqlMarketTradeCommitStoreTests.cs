@@ -1,7 +1,11 @@
 using System.Security.Cryptography;
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using LancerNexus.Gateway;
 using LancerNexus.Protocol;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using MySqlConnector;
 using Xunit;
 
@@ -123,6 +127,47 @@ public sealed class MySqlMarketTradeCommitStoreTests
             Assert.Equal(request.TradeId, message.TradeId);
             Assert.Equal(request.CorrelationId, message.CorrelationId);
 
+            // Simulate the Coordinator committing, then losing its HTTP response.
+            // The first Gateway worker must leave the outbox pending; a replacement
+            // worker must replay the same identifiers and accept the idempotent ACK.
+            var coordinator = new LostFirstResponseCoordinator();
+            using var firstHttp = new HttpClient(coordinator, disposeHandler: false);
+            using var secondHttp = new HttpClient(coordinator, disposeHandler: false);
+            var options = new CoordinatorGatewayOptions(new Uri("https://coordinator.test/"), null,
+                TimeSpan.FromSeconds(3), new string('k', 32));
+            var firstWorker = new MarketTradeOutboxWorker(restartedStore,
+                new CoordinatorMarketClient(firstHttp, options), TimeProvider.System,
+                NullLogger<MarketTradeOutboxWorker>.Instance);
+            await firstWorker.StartAsync(CancellationToken.None);
+            await WaitForOutboxAttemptAsync(connection, request.TradeId, expectedAttemptCount: 1);
+            await firstWorker.StopAsync(CancellationToken.None);
+
+            await using (var makeRetryDue = connection.CreateCommand())
+            {
+                makeRetryDue.CommandText = "UPDATE gateway_market_trade_outbox SET next_attempt_at_utc = UTC_TIMESTAMP(6) WHERE trade_id = @trade";
+                makeRetryDue.Parameters.AddWithValue("@trade", request.TradeId.ToByteArray());
+                Assert.Equal(1, await makeRetryDue.ExecuteNonQueryAsync());
+            }
+
+            var restartedWorker = new MarketTradeOutboxWorker(restartedStore,
+                new CoordinatorMarketClient(secondHttp, options), TimeProvider.System,
+                NullLogger<MarketTradeOutboxWorker>.Instance);
+            await restartedWorker.StartAsync(CancellationToken.None);
+            try
+            {
+                await WaitForOutboxDeliveryAsync(connection, request.TradeId);
+            }
+            finally
+            {
+                await restartedWorker.StopAsync(CancellationToken.None);
+            }
+            Assert.Equal(2, coordinator.Requests.Count);
+            Assert.All(coordinator.Requests, sent =>
+            {
+                Assert.Equal(request.TradeId, sent.TradeId);
+                Assert.Equal(message.CorrelationId, sent.CorrelationId);
+            });
+
             await using (var verify = connection.CreateCommand())
             {
                 verify.CommandText = """
@@ -141,7 +186,6 @@ public sealed class MySqlMarketTradeCommitStoreTests
             var mismatch = await store.PrepareAsync("li-01", tokenHash,
                 request with { Snapshot = request.Snapshot with { Payload = [8, 9] } }, now);
             Assert.Equal(MarketTradeCommitStoreStatus.Conflict, mismatch.Status);
-            await restartedStore.MarkOutboxDeliveredAsync(request.TradeId, now);
             Assert.Empty(await store.ReadPendingOutboxAsync(10));
             CryptographicOperations.ZeroMemory(tokenHash);
             CryptographicOperations.ZeroMemory(token);
@@ -194,6 +238,67 @@ public sealed class MySqlMarketTradeCommitStoreTests
     };
 
     private static string Encode(byte[] token) => Convert.ToBase64String(token).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static async Task WaitForOutboxAttemptAsync(MySqlConnection connection, Guid tradeId,
+        int expectedAttemptCount)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT attempt_count FROM gateway_market_trade_outbox WHERE trade_id = @trade";
+            command.Parameters.AddWithValue("@trade", tradeId.ToByteArray());
+            var value = await command.ExecuteScalarAsync(timeout.Token);
+            if (Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture) >= expectedAttemptCount)
+                return;
+            await Task.Delay(50, timeout.Token);
+        }
+    }
+
+    private static async Task WaitForOutboxDeliveryAsync(MySqlConnection connection, Guid tradeId)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT delivered_at_utc IS NOT NULL FROM gateway_market_trade_outbox WHERE trade_id = @trade";
+            command.Parameters.AddWithValue("@trade", tradeId.ToByteArray());
+            if (Convert.ToBoolean(await command.ExecuteScalarAsync(timeout.Token),
+                    System.Globalization.CultureInfo.InvariantCulture))
+                return;
+            await Task.Delay(50, timeout.Token);
+        }
+    }
+
+    private sealed class LostFirstResponseCoordinator : HttpMessageHandler
+    {
+        private readonly HashSet<Guid> committedTrades = [];
+        public List<MarketTradeResolutionRequestV1> Requests { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var resolution = await request.Content!.ReadFromJsonAsync<MarketTradeResolutionRequestV1>(cancellationToken);
+            Assert.NotNull(resolution);
+            Requests.Add(resolution!);
+            if (committedTrades.Add(resolution!.TradeId))
+                throw new HttpRequestException("Simulated lost response after Coordinator commit.");
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(new MarketTradeReservationResponseV1
+                {
+                    CorrelationId = resolution.CorrelationId,
+                    TradeId = resolution.TradeId,
+                    Status = MarketTradeReservationStatusV1.Committed,
+                    QuoteUnitPrice = 100,
+                    TotalPrice = 201,
+                    MarketRevision = 3,
+                    SystemRevision = 3
+                })
+            };
+        }
+    }
 
     private sealed class MySqlFactAttribute : FactAttribute
     {
