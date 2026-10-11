@@ -241,7 +241,23 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
 
         if (currentVersion is { } version)
         {
-            if (currentExpiry > nowUtc)
+            var currentSessionActive = false;
+            await using (var currentSessionCheck = connection.CreateCommand())
+            {
+                currentSessionCheck.Transaction = transaction;
+                currentSessionCheck.CommandText = """
+                    SELECT 1 FROM gateway_sessions s
+                    INNER JOIN accounts a ON a.account_id = s.account_id
+                    WHERE s.session_id = @session_id AND s.revoked_at_utc IS NULL
+                      AND s.expires_at_utc > @now_utc AND a.status = 'active'
+                    FOR UPDATE;
+                    """;
+                currentSessionCheck.Parameters.AddWithValue("@session_id", currentSession.ToString("D"));
+                currentSessionCheck.Parameters.AddWithValue("@now_utc", nowUtc);
+                currentSessionActive = await currentSessionCheck.ExecuteScalarAsync(cancellationToken) is not null;
+            }
+
+            if (currentExpiry > nowUtc && currentSessionActive)
             {
                 var sameOwner = currentSession == sessionId && currentInstance == instanceId;
                 var sameToken = currentTokenHash is { Length: 32 } storedHash &&
@@ -263,7 +279,9 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
                 UPDATE character_leases
                 SET session_id = @session_id, instance_id = @instance_id, lease_token_hash = @token_hash,
                     lease_version = @next_version, valid_until_utc = @valid_until_utc
-                WHERE character_id = @character_id AND lease_version = @old_version AND valid_until_utc <= @now_utc;
+                WHERE character_id = @character_id AND session_id = @old_session_id
+                  AND lease_version = @old_version
+                  AND (valid_until_utc <= @now_utc OR @reclaim_invalid_session = 1);
                 """;
             takeover.Parameters.AddWithValue("@session_id", sessionId.ToString("D"));
             takeover.Parameters.AddWithValue("@instance_id", instanceId);
@@ -271,8 +289,10 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             takeover.Parameters.AddWithValue("@next_version", nextVersion);
             takeover.Parameters.AddWithValue("@valid_until_utc", validUntilUtc);
             takeover.Parameters.AddWithValue("@character_id", characterId);
+            takeover.Parameters.AddWithValue("@old_session_id", currentSession.ToString("D"));
             takeover.Parameters.AddWithValue("@old_version", version);
             takeover.Parameters.AddWithValue("@now_utc", nowUtc);
+            takeover.Parameters.AddWithValue("@reclaim_invalid_session", currentSessionActive ? 0 : 1);
             if (await takeover.ExecuteNonQueryAsync(cancellationToken) != 1)
                 return await RejectAcquireAsync(transaction, "lease_fence_rejected", cancellationToken);
             await transaction.CommitAsync(cancellationToken);

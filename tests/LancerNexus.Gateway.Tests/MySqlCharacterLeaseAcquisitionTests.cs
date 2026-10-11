@@ -39,6 +39,7 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
             var account = Guid.NewGuid();
             var firstSession = Guid.NewGuid();
             var secondSession = Guid.NewGuid();
+            var thirdSession = Guid.NewGuid();
             await using (var seed = connection.CreateCommand())
             {
                 seed.CommandText = """
@@ -48,13 +49,15 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
                     INSERT INTO gateway_sessions
                         (session_id, account_id, token_nonce_hash, created_at_utc, last_seen_at_utc, expires_at_utc, revoked_at_utc)
                     VALUES (@first_session, @account, @hash, @now, @now, @session_expiry, NULL),
-                           (@second_session, @account, @hash, @now, @now, @session_expiry, NULL);
+                           (@second_session, @account, @hash, @now, @now, @session_expiry, NULL),
+                           (@third_session, @account, @hash, @now, @now, @session_expiry, NULL);
                     INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
                     VALUES (73, @account, 'LeaseTest', @now, @now);
                     """;
                 seed.Parameters.AddWithValue("@account", account.ToString("D"));
                 seed.Parameters.AddWithValue("@first_session", firstSession.ToString("D"));
                 seed.Parameters.AddWithValue("@second_session", secondSession.ToString("D"));
+                seed.Parameters.AddWithValue("@third_session", thirdSession.ToString("D"));
                 seed.Parameters.AddWithValue("@hash", new byte[32]);
                 seed.Parameters.AddWithValue("@now", now);
                 seed.Parameters.AddWithValue("@session_expiry", now.AddHours(1));
@@ -100,6 +103,25 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
             Assert.Equal("reacquired", takeover.ReasonCode);
             Assert.Equal(2, takeover.LeaseVersion);
 
+            await using (var revoke = connection.CreateCommand())
+            {
+                revoke.CommandText = "UPDATE gateway_sessions SET revoked_at_utc = @now WHERE session_id = @session";
+                revoke.Parameters.AddWithValue("@now", now);
+                revoke.Parameters.AddWithValue("@session", secondSession.ToString("D"));
+                Assert.Equal(1, await revoke.ExecuteNonQueryAsync());
+            }
+
+            var revokedSessionTakeover = await repository.AcquireCharacterLeaseAsync(account, thirdSession, 73,
+                "liberty-03", Enumerable.Repeat((byte)3, 32).ToArray(), now.AddMinutes(15), now);
+            Assert.True(revokedSessionTakeover.Accepted);
+            Assert.Equal("reacquired", revokedSessionTakeover.ReasonCode);
+            Assert.Equal(3, revokedSessionTakeover.LeaseVersion);
+
+            var revokedOwner = await repository.AcquireCharacterLeaseAsync(account, secondSession, 73,
+                "liberty-02", Enumerable.Repeat((byte)2, 32).ToArray(), now.AddMinutes(15), now);
+            Assert.False(revokedOwner.Accepted);
+            Assert.Equal("session_or_account_invalid", revokedOwner.ReasonCode);
+
             var staleOwner = await repository.AcquireCharacterLeaseAsync(account, firstSession, 73,
                 "liberty-01", firstHash, now.AddMinutes(15), now);
             Assert.False(staleOwner.Accepted);
@@ -109,8 +131,8 @@ public sealed class MySqlCharacterLeaseAcquisitionTests
             Assert.False(staleRelease.Released);
             Assert.Equal("lease_mismatch", staleRelease.ReasonCode);
             var current = await repository.FindActiveCharacterTargetLeaseAsync(73, now);
-            Assert.Equal("liberty-02", current?.InstanceId);
-            Assert.Equal(2, current?.LeaseVersion);
+            Assert.Equal("liberty-03", current?.InstanceId);
+            Assert.Equal(3, current?.LeaseVersion);
         }
         finally
         {
