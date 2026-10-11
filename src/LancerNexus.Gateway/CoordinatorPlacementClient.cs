@@ -5,7 +5,8 @@ using LancerNexus.Protocol;
 
 namespace LancerNexus.Gateway;
 
-public sealed record CoordinatorGatewayOptions(Uri? BaseAddress, string? InternalApiKey, TimeSpan Timeout)
+public sealed record CoordinatorGatewayOptions(Uri? BaseAddress, string? InternalApiKey, TimeSpan Timeout,
+    string? MarketGatewayApiKey = null)
 {
     public static CoordinatorGatewayOptions FromConfiguration(IConfiguration configuration)
     {
@@ -18,12 +19,16 @@ public sealed record CoordinatorGatewayOptions(Uri? BaseAddress, string? Interna
         if (timeoutSeconds <= 0)
             throw new InvalidOperationException("Gateway:RequestTimeoutSeconds must be positive.");
         return new CoordinatorGatewayOptions(address, configuration["Gateway:CoordinatorApiKey"],
-            TimeSpan.FromSeconds(timeoutSeconds));
+            TimeSpan.FromSeconds(timeoutSeconds), configuration["Gateway:CoordinatorMarketTradeApiKey"]);
     }
 
     public bool IsConfigured => BaseAddress is not null &&
                                  !string.IsNullOrWhiteSpace(InternalApiKey) &&
                                  System.Text.Encoding.UTF8.GetByteCount(InternalApiKey) >= 32;
+
+    public bool IsMarketTradeConfigured => BaseAddress is not null &&
+        !string.IsNullOrWhiteSpace(MarketGatewayApiKey) &&
+        System.Text.Encoding.UTF8.GetByteCount(MarketGatewayApiKey) >= 32;
 }
 
 public sealed record CoordinatorPlacementResult(

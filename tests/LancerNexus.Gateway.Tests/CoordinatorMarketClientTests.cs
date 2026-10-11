@@ -11,6 +11,36 @@ namespace LancerNexus.Gateway.Tests;
 public sealed class CoordinatorMarketClientTests
 {
     [Fact]
+    public async Task ReserveQuote_UsesDedicatedMarketTradeCredentialAndValidatesBinding()
+    {
+        using var handler = new ReservationHandler();
+        using var httpClient = new HttpClient(handler);
+        var tradeKey = new string('t', 32);
+        var client = new CoordinatorMarketClient(httpClient,
+            new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), new string('r', 32),
+                TimeSpan.FromSeconds(5), tradeKey));
+        var request = new MarketTradeQuoteReservationRequestV1
+        {
+            CorrelationId = Guid.NewGuid(), TradeId = Guid.NewGuid(), MarketId = "li01_base",
+            SystemId = "li-01", GoodId = "commodity_food", Side = MarketTradeSideV1.Buy,
+            Quantity = 2, ExpectedMarketRevision = 7, ExpectedReputationRevision = 9,
+            ReputationPriceFactorPartsPerMillion = 950_000, ExpectedQuoteUnitPrice = 95,
+            ExpectedTotalPrice = 190
+        };
+
+        var result = await client.ReserveQuoteAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.NotNull(result.Reservation);
+        Assert.True(result.Reservation!.Matches(request));
+        Assert.Equal(request, handler.ForwardedRequest);
+        Assert.Equal("Bearer", handler.Authorization?.Scheme);
+        Assert.Equal(tradeKey, handler.Authorization?.Parameter);
+        Assert.Equal("https://coordinator.example/internal/v1/market/trades/reserve-quote",
+            handler.RequestUri?.ToString());
+    }
+
+    [Fact]
     public async Task ReadQuote_ForwardsCharacterAndRevisionBindingOverPrivateCoordinatorCall()
     {
         using var handler = new QuoteHandler();
@@ -281,6 +311,34 @@ public sealed class CoordinatorMarketClientTests
                 PricingPolicyVersion = 1
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(quote) };
+        }
+    }
+
+    private sealed class ReservationHandler : HttpMessageHandler
+    {
+        public AuthenticationHeaderValue? Authorization { get; private set; }
+        public Uri? RequestUri { get; private set; }
+        public MarketTradeQuoteReservationRequestV1? ForwardedRequest { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Authorization = request.Headers.Authorization;
+            RequestUri = request.RequestUri;
+            ForwardedRequest = await request.Content!.ReadFromJsonAsync<MarketTradeQuoteReservationRequestV1>(cancellationToken);
+            var response = new MarketTradeQuoteReservationResponseV1
+            {
+                CorrelationId = ForwardedRequest!.CorrelationId,
+                TradeId = ForwardedRequest.TradeId,
+                Status = MarketTradeReservationStatusV1.Reserved,
+                QuoteUnitPrice = ForwardedRequest.ExpectedQuoteUnitPrice,
+                TotalPrice = ForwardedRequest.ExpectedTotalPrice,
+                MarketRevision = 8,
+                SystemRevision = 22,
+                ReputationRevision = ForwardedRequest.ExpectedReputationRevision,
+                ReputationPriceFactorPartsPerMillion = ForwardedRequest.ReputationPriceFactorPartsPerMillion
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
         }
     }
 

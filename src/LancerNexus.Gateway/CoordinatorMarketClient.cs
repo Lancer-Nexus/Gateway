@@ -34,8 +34,52 @@ public sealed record CoordinatorMarketQuoteReadResult(
     MarketQuoteResponseV1? Quote,
     string? Error);
 
+public sealed record CoordinatorMarketQuoteReservationResult(
+    HttpStatusCode? StatusCode,
+    MarketTradeQuoteReservationResponseV1? Reservation,
+    string? Error);
+
 public sealed class CoordinatorMarketClient(HttpClient httpClient, CoordinatorGatewayOptions options)
 {
+    public async Task<CoordinatorMarketQuoteReservationResult> ReserveQuoteAsync(
+        MarketTradeQuoteReservationRequestV1 request, CancellationToken cancellationToken = default)
+    {
+        if (!request.IsValid())
+            return new(null, null, "invalid_market_trade_quote_reservation");
+        if (!options.IsMarketTradeConfigured)
+            return new(null, null, "coordinator_market_trade_not_configured");
+        using var message = new HttpRequestMessage(HttpMethod.Post,
+            new Uri(options.BaseAddress!, "internal/v1/market/trades/reserve-quote"));
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.MarketGatewayApiKey);
+        message.Content = JsonContent.Create(request);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(options.Timeout);
+        try
+        {
+            using var response = await httpClient.SendAsync(message, timeout.Token);
+            if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Conflict or
+                HttpStatusCode.BadRequest))
+                return new(response.StatusCode, null, "coordinator_market_reservation_rejected");
+            var reservation = await response.Content
+                .ReadFromJsonAsync<MarketTradeQuoteReservationResponseV1>(timeout.Token);
+            if (reservation is null || !reservation.Matches(request))
+                return new(response.StatusCode, null, "coordinator_invalid_market_reservation_response");
+            return new(response.StatusCode, reservation, null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new(null, null, "coordinator_timeout");
+        }
+        catch (HttpRequestException)
+        {
+            return new(null, null, "coordinator_unavailable");
+        }
+        catch (JsonException)
+        {
+            return new(null, null, "coordinator_invalid_market_reservation_response");
+        }
+    }
+
     public async Task<CoordinatorMarketSystemsReadResult> ReadSystemsAsync(
         MarketSystemsReadRequestV1 request,
         CancellationToken cancellationToken = default)
