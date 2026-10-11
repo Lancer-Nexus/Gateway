@@ -184,7 +184,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1", "public_market_catalog_v1", "personal_market_quote_v1" }
 }));
 
 app.MapGet("/api/v1/market/catalog/goods", async (
@@ -217,6 +217,84 @@ app.MapGet("/api/v1/market/catalog/goods", async (
     if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
         return Results.StatusCode(StatusCodes.Status304NotModified);
     return Results.Ok(catalog);
+}).RequireRateLimiting("market-read");
+
+app.MapGet("/api/v1/market/markets/{marketId}/quote", async (
+    string marketId,
+    string? systemId,
+    string? goodId,
+    string? side,
+    long? quantity,
+    long? characterId,
+    long? expectedMarketRevision,
+    long? expectedReputationRevision,
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    ICharacterSaveSnapshotStore snapshots,
+    CoordinatorMarketClient market,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var authorization = SessionAuthorization.AuthorizeToken(context.Request.Headers.Authorization,
+        sessionTokens, timeProvider.GetUtcNow().UtcDateTime);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+
+    if (characterId is null or <= 0 || systemId is null || goodId is null || side is null ||
+        quantity is null || !Enum.TryParse<MarketTradeSideV1>(side, true, out var tradeSide))
+        return Results.BadRequest(new { error = "invalid_market_quote_request" });
+    var claims = authorization.Claims!;
+    var reputation = await snapshots.ReadFactionReputationAsync(claims.AccountId, claims.SessionId,
+        characterId.Value, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+    if (reputation.Status != CharacterFactionReputationReadStatus.Found || reputation.ReputationRevision is null)
+        return reputation.Status switch
+        {
+            CharacterFactionReputationReadStatus.SessionRejected => Results.Unauthorized(),
+            CharacterFactionReputationReadStatus.NotFound => Results.NotFound(),
+            CharacterFactionReputationReadStatus.InvalidRequest => Results.BadRequest(new { error = "invalid_character_id" }),
+            _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+        };
+    if (expectedReputationRevision is long expected && expected != reputation.ReputationRevision)
+        return Results.Conflict(new
+        {
+            error = "reputation_revision_expired",
+            reputationRevision = reputation.ReputationRevision
+        });
+
+    var request = new MarketQuoteRequestV1
+    {
+        CorrelationId = Guid.NewGuid(),
+        CharacterId = characterId.Value,
+        SystemId = systemId,
+        MarketId = marketId,
+        GoodId = goodId,
+        Side = tradeSide,
+        Quantity = quantity.Value,
+        ExpectedMarketRevision = expectedMarketRevision,
+        ExpectedReputationRevision = reputation.ReputationRevision.Value
+    };
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_quote_request" });
+
+    var result = await market.ReadQuoteAsync(request, cancellationToken);
+    if (result.Quote is not { } quote || !quote.IsValidFor(request))
+        return Results.StatusCode(result.StatusCode is null or HttpStatusCode.ServiceUnavailable
+            ? StatusCodes.Status503ServiceUnavailable
+            : StatusCodes.Status502BadGateway);
+    if (quote.Status == MarketQuoteStatusV1.Quoted && quote.ExpiresUtc <= timeProvider.GetUtcNow())
+        return Results.Conflict(new { error = "market_quote_expired" });
+    return quote.Status switch
+    {
+        MarketQuoteStatusV1.Quoted => Results.Ok(quote),
+        MarketQuoteStatusV1.MarketRevisionMismatch or MarketQuoteStatusV1.ReputationRevisionMismatch =>
+            Results.Conflict(quote),
+        MarketQuoteStatusV1.NotFound => Results.NotFound(quote),
+        MarketQuoteStatusV1.Rejected => Results.BadRequest(quote),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
 }).RequireRateLimiting("market-read");
 
 app.MapGet("/api/v1/market/systems/{systemId}/goods", async (

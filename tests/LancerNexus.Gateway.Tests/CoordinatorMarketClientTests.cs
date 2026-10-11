@@ -11,6 +11,34 @@ namespace LancerNexus.Gateway.Tests;
 public sealed class CoordinatorMarketClientTests
 {
     [Fact]
+    public async Task ReadQuote_ForwardsCharacterAndRevisionBindingOverPrivateCoordinatorCall()
+    {
+        using var handler = new QuoteHandler();
+        using var httpClient = new HttpClient(handler);
+        var apiKey = new string('k', 32);
+        var client = new CoordinatorMarketClient(httpClient,
+            new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), apiKey,
+                TimeSpan.FromSeconds(5)));
+        var request = new MarketQuoteRequestV1
+        {
+            CorrelationId = Guid.NewGuid(), CharacterId = 42, SystemId = "li-01",
+            MarketId = "li01_base", GoodId = "commodity_food", Side = MarketTradeSideV1.Buy,
+            Quantity = 2, ExpectedMarketRevision = 7, ExpectedReputationRevision = 9
+        };
+
+        var result = await client.ReadQuoteAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.NotNull(result.Quote);
+        Assert.True(result.Quote!.IsValidFor(request));
+        Assert.Equal(request, handler.ForwardedRequest);
+        Assert.Equal("Bearer", handler.Authorization?.Scheme);
+        Assert.Equal(apiKey, handler.Authorization?.Parameter);
+        Assert.Equal("https://coordinator.example/internal/v1/market/quotes/read",
+            handler.RequestUri?.ToString());
+    }
+
+    [Fact]
     public async Task ReadCatalog_UsesPrivateCoordinatorCredentialAndValidatesRevisionPinnedResponse()
     {
         using var handler = new CatalogHandler();
@@ -145,6 +173,42 @@ public sealed class CoordinatorMarketClientTests
                 Goods = [new MarketCatalogGoodV1 { GoodId = "commodity_food", Category = "commodity" }]
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
+        }
+    }
+
+    private sealed class QuoteHandler : HttpMessageHandler
+    {
+        public AuthenticationHeaderValue? Authorization { get; private set; }
+        public Uri? RequestUri { get; private set; }
+        public MarketQuoteRequestV1? ForwardedRequest { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Authorization = request.Headers.Authorization;
+            RequestUri = request.RequestUri;
+            ForwardedRequest = await request.Content!.ReadFromJsonAsync<MarketQuoteRequestV1>(cancellationToken);
+            var quote = new MarketQuoteResponseV1
+            {
+                CorrelationId = ForwardedRequest!.CorrelationId,
+                CharacterId = ForwardedRequest.CharacterId,
+                SystemId = ForwardedRequest.SystemId,
+                MarketId = ForwardedRequest.MarketId,
+                GoodId = ForwardedRequest.GoodId,
+                Side = ForwardedRequest.Side,
+                Quantity = ForwardedRequest.Quantity,
+                Status = MarketQuoteStatusV1.Quoted,
+                MarketRevision = ForwardedRequest.ExpectedMarketRevision ?? 7,
+                ReputationRevision = ForwardedRequest.ExpectedReputationRevision,
+                MarketFactionId = "li_grp",
+                AppliedReputation = 0.5f,
+                ReputationFactorPartsPerMillion = 950_000,
+                QuoteUnitPrice = 95,
+                TotalPrice = 190,
+                ExpiresUtc = DateTimeOffset.UtcNow.AddSeconds(15),
+                PricingPolicyVersion = 1
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(quote) };
         }
     }
 }

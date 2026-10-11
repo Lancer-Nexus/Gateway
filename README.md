@@ -12,7 +12,9 @@ The Gateway is the public entry point for the Lancer Nexus MMO client. It authen
 
 `GET /api/v1/market/catalog/goods` provides the complete seeded goods list, including goods without a current offer. It supports `pageSize` (1–500), `afterGoodId` and `expectedCatalogRevision`; continuation pages pin the seed SHA-256 revision. A changed catalog returns `409 Conflict`. The response uses a public cache and page-specific `ETag` and the same read rate limit.
 
-System market snapshots return reputation-neutral market rows. Personal quotes, trade booking and Coordinator reservation calls are not yet exposed by Gateway.
+`GET /api/v1/market/markets/{marketId}/quote` requires an active bearer session and query values `characterId`, `systemId`, `goodId`, `side` (`buy` or `sell`) and `quantity` (1–1,000,000). Gateway verifies character ownership and the live session, then Coordinator reads reputation at that exact saved-snapshot revision and quotes the shared market row. V1 changes each marginal unit price by 10% per full reputation point (buy discount, sell premium), bounded to ±10%; the response includes the used faction, reputation and market revisions, policy version and 15-second expiry. `Cache-Control: no-store` applies. The preview reserves neither stock nor credits; a future trade reservation must revalidate both revisions.
+
+System market snapshots return reputation-neutral market rows. Trade booking and Coordinator reservation calls are not yet exposed by Gateway.
 
 Authenticated `GET /api/v1/characters/{characterId}/faction-reputation` reads the character's saved `[Player] house` values from the latest Gateway-owned SaveGame snapshot. The bearer session must still be active in MySQL and the character must belong to that account. The response includes `reputationRevision`, which is the SaveGame snapshot revision; it does not claim to include simulation changes newer than the latest persisted snapshot. Missing faction entries use the game's neutral value `0`.
 

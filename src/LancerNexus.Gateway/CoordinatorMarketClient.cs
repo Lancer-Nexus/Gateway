@@ -19,8 +19,52 @@ public sealed record CoordinatorMarketCatalogReadResult(
     MarketCatalogReadResponseV1? Catalog,
     string? Error);
 
+public sealed record CoordinatorMarketQuoteReadResult(
+    HttpStatusCode? StatusCode,
+    MarketQuoteResponseV1? Quote,
+    string? Error);
+
 public sealed class CoordinatorMarketClient(HttpClient httpClient, CoordinatorGatewayOptions options)
 {
+    public async Task<CoordinatorMarketQuoteReadResult> ReadQuoteAsync(
+        MarketQuoteRequestV1 request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!request.IsValid())
+            return new(null, null, "invalid_market_quote_request");
+        if (!options.IsConfigured)
+            return new(null, null, "coordinator_not_configured");
+        using var message = new HttpRequestMessage(HttpMethod.Post,
+            new Uri(options.BaseAddress!, "internal/v1/market/quotes/read"));
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.InternalApiKey);
+        message.Content = JsonContent.Create(request);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(options.Timeout);
+        try
+        {
+            using var response = await httpClient.SendAsync(message, timeout.Token);
+            if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Conflict or
+                HttpStatusCode.NotFound or HttpStatusCode.BadRequest))
+                return new(response.StatusCode, null, "coordinator_market_quote_rejected");
+            var quote = await response.Content.ReadFromJsonAsync<MarketQuoteResponseV1>(timeout.Token);
+            if (quote is null || !quote.IsValidFor(request))
+                return new(response.StatusCode, null, "coordinator_invalid_market_quote_response");
+            return new(response.StatusCode, quote, null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new(null, null, "coordinator_timeout");
+        }
+        catch (HttpRequestException)
+        {
+            return new(null, null, "coordinator_unavailable");
+        }
+        catch (JsonException)
+        {
+            return new(null, null, "coordinator_invalid_market_quote_response");
+        }
+    }
+
     public async Task<CoordinatorMarketCatalogReadResult> ReadCatalogAsync(
         MarketCatalogReadRequestV1 request,
         CancellationToken cancellationToken = default)
