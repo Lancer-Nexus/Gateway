@@ -183,7 +183,7 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "character_faction_reputation_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1" }
 }));
 
 app.MapGet("/api/v1/market/systems/{systemId}/goods", async (
@@ -309,6 +309,43 @@ app.MapGet("/api/v1/characters", async (
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
 });
+
+app.MapGet("/api/v1/characters/{characterId:long}/faction-reputation", async (
+    long characterId,
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    ICharacterSaveSnapshotStore snapshots,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization,
+        sessionTokens,
+        timeProvider.GetUtcNow().UtcDateTime);
+    if (authorization.ConfigurationError)
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted)
+        return Results.Unauthorized();
+
+    var claims = authorization.Claims!;
+    var result = await snapshots.ReadFactionReputationAsync(claims.AccountId, claims.SessionId, characterId,
+        timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+    return result.Status switch
+    {
+        CharacterFactionReputationReadStatus.Found => Results.Ok(new
+        {
+            schemaVersion = 1,
+            characterId,
+            reputationRevision = result.ReputationRevision,
+            factions = result.Factions
+        }),
+        CharacterFactionReputationReadStatus.InvalidRequest => Results.BadRequest(new { error = "invalid_character_id" }),
+        CharacterFactionReputationReadStatus.SessionRejected => Results.Unauthorized(),
+        CharacterFactionReputationReadStatus.NotFound => Results.NotFound(),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+}).RequireRateLimiting("character-snapshot");
 
 app.MapPost("/api/v1/events/{eventId}/registrations", async (string eventId,
     GatewayEventRegistrationSubmission request, SessionTokenCodec sessionTokens,

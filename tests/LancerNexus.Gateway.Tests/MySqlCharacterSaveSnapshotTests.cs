@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using LancerNexus.Gateway;
 using LancerNexus.Protocol;
 using Microsoft.Extensions.Configuration;
@@ -97,7 +98,11 @@ public sealed class MySqlCharacterSaveSnapshotTests
             }).Build();
             var protection = new TransferSnapshotProtection(configuration);
             var store = new MySqlCharacterSaveSnapshotStore(databaseConfig.ConnectionString, protection);
-            var write = WriteRequest(token1, 1, 1, [10, 20, 30]);
+            var write = WriteRequest(token1, 1, 1, Encoding.Latin1.GetBytes("""
+                [Player]
+                house = 0.625, li_n_grp
+                house = -0.25, fc_rh_grp
+                """));
             var hash1 = SHA256.HashData(token1);
 
             var stored = await store.WriteAsync("li-01", hash1, write, now);
@@ -107,10 +112,30 @@ public sealed class MySqlCharacterSaveSnapshotTests
 
             var read = await store.ReadAsync("li-01", hash1, new CharacterSaveSnapshotReadRequestV1
             {
-                CorrelationId = Guid.NewGuid(), CharacterId = 73, LeaseToken = Encode(token1), LeaseVersion = 1
+                CorrelationId = Guid.NewGuid(),
+                CharacterId = 73,
+                LeaseToken = Encode(token1),
+                LeaseVersion = 1
             }, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, read.Status);
             Assert.Equal(write.Payload, read.Snapshot!.Payload);
+
+            var reputation = await store.ReadFactionReputationAsync(account, session, 73, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.Found, reputation.Status);
+            Assert.Equal(1, reputation.ReputationRevision);
+            Assert.Collection(reputation.Factions!,
+                item =>
+                {
+                    Assert.Equal("fc_rh_grp", item.FactionId);
+                    Assert.Equal(-0.25f, item.Value);
+                },
+                item =>
+                {
+                    Assert.Equal("li_n_grp", item.FactionId);
+                    Assert.Equal(0.625f, item.Value);
+                });
+            var otherAccount = await store.ReadFactionReputationAsync(Guid.NewGuid(), session, 73, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.NotFound, otherAccount.Status);
 
             await using (var takeover = connection.CreateCommand())
             {
@@ -123,6 +148,16 @@ public sealed class MySqlCharacterSaveSnapshotTests
             Assert.Equal(CharacterSaveSnapshotStoreStatus.LeaseRejected, stale.Status);
             var current = await store.WriteAsync("li-02", SHA256.HashData(token2), WriteRequest(token2, 2, 2, [40]), now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, current.Status);
+
+            await using (var revoke = connection.CreateCommand())
+            {
+                revoke.CommandText = "UPDATE gateway_sessions SET revoked_at_utc = @now WHERE session_id = @session";
+                revoke.Parameters.AddWithValue("@now", now);
+                revoke.Parameters.AddWithValue("@session", session.ToString("D"));
+                await revoke.ExecuteNonQueryAsync();
+            }
+            var revokedSession = await store.ReadFactionReputationAsync(account, session, 73, now);
+            Assert.Equal(CharacterFactionReputationReadStatus.SessionRejected, revokedSession.Status);
         }
         finally
         {
@@ -134,8 +169,12 @@ public sealed class MySqlCharacterSaveSnapshotTests
 
     private static CharacterSaveSnapshotWriteRequestV1 WriteRequest(byte[] token, long fence, long revision, byte[] payload) => new()
     {
-        CorrelationId = Guid.NewGuid(), CharacterId = 73, LeaseToken = Encode(token),
-        LeaseVersion = fence, Revision = revision, Payload = payload
+        CorrelationId = Guid.NewGuid(),
+        CharacterId = 73,
+        LeaseToken = Encode(token),
+        LeaseVersion = fence,
+        Revision = revision,
+        Payload = payload
     };
 
     private static string Encode(byte[] token) => Convert.ToBase64String(token).TrimEnd('=').Replace('+', '-').Replace('/', '_');
