@@ -435,7 +435,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         }
     }
 
-    private static async Task<bool> LockCharacterAsync(MySqlConnection connection, MySqlTransaction transaction,
+    internal static async Task<bool> LockCharacterAsync(MySqlConnection connection, MySqlTransaction transaction,
         long characterId, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -484,7 +484,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    private static async Task<bool> HasCurrentLeaseAsync(MySqlConnection connection, MySqlTransaction transaction,
+    internal static async Task<bool> HasCurrentLeaseAsync(MySqlConnection connection, MySqlTransaction transaction,
         string instanceId, ReadOnlyMemory<byte> leaseTokenHash, long characterId, long leaseVersion,
         DateTime nowUtc, CancellationToken cancellationToken)
     {
@@ -511,7 +511,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         finally { CryptographicOperations.ZeroMemory(tokenHash); }
     }
 
-    private static async Task<(long Revision, long LeaseVersion, int SchemaVersion, byte[] Hash)?>
+    internal static async Task<(long Revision, long LeaseVersion, int SchemaVersion, byte[] Hash)?>
         ReadRevisionForUpdateAsync(MySqlConnection connection, MySqlTransaction transaction, long characterId,
             CancellationToken cancellationToken)
     {
@@ -527,7 +527,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt32(2), (byte[])reader.GetValue(3));
     }
 
-    private static async Task InsertAsync(MySqlConnection connection, MySqlTransaction transaction,
+    internal static async Task InsertAsync(MySqlConnection connection, MySqlTransaction transaction,
         CharacterSaveSnapshotWriteRequestV1 request, string keyId, byte[] hash, byte[] protectedSnapshot,
         DateTime nowUtc, CancellationToken cancellationToken)
     {
@@ -544,7 +544,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task UpdateAsync(MySqlConnection connection, MySqlTransaction transaction,
+    internal static async Task UpdateAsync(MySqlConnection connection, MySqlTransaction transaction,
         CharacterSaveSnapshotWriteRequestV1 request, string keyId, byte[] hash, byte[] protectedSnapshot,
         DateTime nowUtc, CancellationToken cancellationToken)
     {
@@ -561,7 +561,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static void AddSnapshotParameters(MySqlCommand command, CharacterSaveSnapshotWriteRequestV1 request,
+    internal static void AddSnapshotParameters(MySqlCommand command, CharacterSaveSnapshotWriteRequestV1 request,
         string keyId, byte[] hash, byte[] protectedSnapshot, DateTime nowUtc)
     {
         command.Parameters.AddWithValue("@character", request.CharacterId);
@@ -591,7 +591,7 @@ public sealed class MySqlCharacterSaveSnapshotStore(
             (byte[])reader.GetValue(4), (byte[])reader.GetValue(5));
     }
 
-    private static byte[] AssociatedData(long characterId, long revision)
+    internal static byte[] AssociatedData(long characterId, long revision)
     {
         var value = new byte[sizeof(long) * 2];
         BinaryPrimitives.WriteInt64LittleEndian(value.AsSpan(0, sizeof(long)), characterId);
@@ -682,7 +682,7 @@ public sealed class CharacterSaveSnapshotService(
         finally { CryptographicOperations.ZeroMemory(tokenHash); }
     }
 
-    private static bool TryHashLeaseToken(string value, out byte[] tokenHash)
+    internal static bool TryHashLeaseToken(string value, out byte[] tokenHash)
     {
         tokenHash = [];
         try

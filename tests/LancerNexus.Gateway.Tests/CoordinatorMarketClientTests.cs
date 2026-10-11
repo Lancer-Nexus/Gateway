@@ -11,6 +11,33 @@ namespace LancerNexus.Gateway.Tests;
 public sealed class CoordinatorMarketClientTests
 {
     [Fact]
+    public async Task ResolveTrade_UsesDedicatedCredentialAndValidatesTradeBinding()
+    {
+        using var handler = new TradeResolutionHandler();
+        using var httpClient = new HttpClient(handler);
+        var tradeKey = new string('t', 32);
+        var client = new CoordinatorMarketClient(httpClient,
+            new CoordinatorGatewayOptions(new Uri("https://coordinator.example/"), new string('r', 32),
+                TimeSpan.FromSeconds(5), tradeKey));
+        var request = new MarketTradeResolutionRequestV1
+        {
+            CorrelationId = Guid.NewGuid(), TradeId = Guid.NewGuid(),
+            Resolution = MarketTradeResolutionV1.Commit
+        };
+
+        var result = await client.ResolveTradeAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.NotNull(result.Resolution);
+        Assert.True(result.Resolution!.Matches(request));
+        Assert.Equal(request, handler.ForwardedRequest);
+        Assert.Equal("Bearer", handler.Authorization?.Scheme);
+        Assert.Equal(tradeKey, handler.Authorization?.Parameter);
+        Assert.Equal("https://coordinator.example/internal/v1/market/trades/resolve",
+            handler.RequestUri?.ToString());
+    }
+
+    [Fact]
     public async Task ReserveQuote_UsesDedicatedMarketTradeCredentialAndValidatesBinding()
     {
         using var handler = new ReservationHandler();
@@ -340,6 +367,32 @@ public sealed class CoordinatorMarketClientTests
                 MarketFactionId = ForwardedRequest.MarketFactionId
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
+        }
+    }
+
+    private sealed class TradeResolutionHandler : HttpMessageHandler
+    {
+        public AuthenticationHeaderValue? Authorization { get; private set; }
+        public Uri? RequestUri { get; private set; }
+        public MarketTradeResolutionRequestV1? ForwardedRequest { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Authorization = request.Headers.Authorization;
+            RequestUri = request.RequestUri;
+            ForwardedRequest = await request.Content!.ReadFromJsonAsync<MarketTradeResolutionRequestV1>(cancellationToken);
+            var result = new MarketTradeReservationResponseV1
+            {
+                CorrelationId = ForwardedRequest!.CorrelationId,
+                TradeId = ForwardedRequest.TradeId,
+                Status = MarketTradeReservationStatusV1.Committed,
+                QuoteUnitPrice = 100,
+                TotalPrice = 200,
+                MarketRevision = 8,
+                SystemRevision = 9
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(result) };
         }
     }
 

@@ -154,9 +154,18 @@ builder.Services.AddSingleton<ICharacterSaveSnapshotStore>(services =>
         ? new CharacterSaveSnapshotStoreNotConfigured()
         : new MySqlCharacterSaveSnapshotStore(gatewayConnectionString,
             services.GetRequiredService<TransferSnapshotProtection>()));
+builder.Services.AddSingleton<IMarketTradeCommitStore>(services =>
+    string.IsNullOrWhiteSpace(gatewayConnectionString)
+        ? new MarketTradeCommitStoreNotConfigured()
+        : new MySqlMarketTradeCommitStore(gatewayConnectionString,
+            services.GetRequiredService<TransferSnapshotProtection>()));
 builder.Services.AddTransient<CharacterSaveSnapshotService>();
+builder.Services.AddTransient<MarketTradeCommitService>();
 if (!string.IsNullOrWhiteSpace(gatewayConnectionString))
+{
     builder.Services.AddHostedService<ExpiredSessionCleanupService>();
+    builder.Services.AddHostedService<MarketTradeOutboxWorker>();
+}
 builder.Services.AddSingleton<TransferSnapshotProtection>();
 builder.Services.AddSingleton<ITransferSnapshotStore>(services =>
     string.IsNullOrWhiteSpace(gatewayConnectionString)
@@ -922,6 +931,30 @@ app.MapPost("/api/v1/game/characters/snapshot/write", async (
         "character_not_found" => Results.NotFound(result),
         "snapshot_persistence_unavailable" => Results.StatusCode(StatusCodes.Status503ServiceUnavailable),
         _ => Results.Conflict(result)
+    };
+}).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/api/v1/game/characters/market-trades/commit", async (
+    MarketTradeCommitRequestV1 request,
+    GameInstanceKeyAuthenticator instances,
+    MarketTradeCommitService trades,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (request is null || !request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_trade_commit_request" });
+    if (!instances.TryAuthenticate(context.Request, out var instanceId)) return Results.Unauthorized();
+    var response = await trades.CommitAsync(request, instanceId, cancellationToken);
+    if (!response.IsValidFor(request)) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    return response.Status switch
+    {
+        MarketTradeCommitStatusV1.Committed or MarketTradeCommitStatusV1.Duplicate => Results.Ok(response),
+        MarketTradeCommitStatusV1.Pending => Results.Accepted(value: response),
+        MarketTradeCommitStatusV1.NotFound => Results.NotFound(response),
+        MarketTradeCommitStatusV1.SnapshotConflict or MarketTradeCommitStatusV1.LeaseRejected or
+            MarketTradeCommitStatusV1.ReservationRejected or MarketTradeCommitStatusV1.Conflict => Results.Conflict(response),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
     };
 }).RequireRateLimiting("character-snapshot");
 
