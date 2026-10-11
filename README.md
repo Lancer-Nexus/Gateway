@@ -6,6 +6,12 @@ Typed Protocol AdminQuery commands are relayed to Administration using private `
 
 The Gateway is the public entry point for the Lancer Nexus MMO client. It authenticates accounts, creates sessions, assigns players to game instances and coordinates controlled transfers.
 
+## Public market snapshot
+
+`GET /api/v1/market/systems/{systemId}/goods` exposes one bounded page of the shared Coordinator market projection. It supports `pageSize` (1–500), `afterMarketId`, `afterGoodId` and `expectedSystemRevision`; continuation pages must pin the revision returned by the first page. A revision that is no longer available returns `409 Conflict`, so callers can restart pagination rather than combine inconsistent data. Responses include a short public cache lifetime and a page-specific `ETag`. Gateway uses its private HTTPS Coordinator connection and never returns the service credential. Reads are limited by `Gateway:MarketReadRateLimitPerMinute` (default 120 per source IP).
+
+This endpoint returns reputation-neutral market rows. Character reputation, private quotes, the full goods catalog, trade booking and Coordinator reservation calls are not yet exposed by Gateway.
+
 ## Responsibilities
 
 - E-mail and password login

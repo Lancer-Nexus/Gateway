@@ -2,6 +2,7 @@ using LancerNexus.Gateway;
 using LancerNexus.Protocol;
 using MySqlConnector;
 using System.Globalization;
+using System.Net;
 using System.Net.Sockets;
 using System.Threading.RateLimiting;
 
@@ -14,6 +15,7 @@ var eventRegistrationRateLimit = ReadPositiveLimit(builder.Configuration,
 var transferRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferRateLimitPerMinute", 10);
 var transferStatusRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:TransferStatusRateLimitPerMinute", 120);
 var characterSnapshotRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:CharacterSnapshotRateLimitPerMinute", 600);
+var marketReadRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:MarketReadRateLimitPerMinute", 120);
 var sessionRefreshRateLimit = ReadPositiveLimit(builder.Configuration, "Gateway:SessionRefreshRateLimitPerMinute", 120);
 builder.Services.AddRateLimiter(options =>
 {
@@ -36,6 +38,15 @@ builder.Services.AddRateLimiter(options =>
         _ => new FixedWindowRateLimiterOptions
         {
             PermitLimit = sessionRefreshRateLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("market-read", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = marketReadRateLimit,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
             AutoReplenishment = true
@@ -155,6 +166,7 @@ builder.Services.AddSingleton<ITransferSnapshotStore>(services =>
 builder.Services.AddSingleton<GatewayAuthenticationService>();
 builder.Services.AddHttpClient<CoordinatorPlacementClient>();
 builder.Services.AddHttpClient<ICoordinatorTransferClient, CoordinatorTransferClient>();
+builder.Services.AddHttpClient<CoordinatorMarketClient>();
 
 var app = builder.Build();
 await LogStartupDiagnosticsAsync(app, gatewayConnectionString, coordinatorOptions, sessionTokenOptions);
@@ -171,8 +183,46 @@ app.MapGet("/api/v1/capabilities", () => Results.Ok(new
 {
     service = "gateway",
     protocolVersion = LancerNexus.Protocol.ProtocolConstants.ProtocolVersion,
-    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1" }
+    capabilities = new[] { "health_v1", "protocol_v1", "auth_session_v1", "coordinator_placement_v1", "join_ticket_v1", "character_identity_resolve_v1", "character_lease_acquire_v1", "character_lease_renew_v1", "character_save_snapshot_v1", "transfer_start_v1", "transfer_ticket_v1", "transfer_source_freeze_v1", "transfer_snapshot_v1", "transfer_accept_v1", "transfer_release_v1", "event_registration_v1", "client_version_hello_v1", "public_market_snapshot_v1" }
 }));
+
+app.MapGet("/api/v1/market/systems/{systemId}/goods", async (
+    string systemId,
+    string? afterMarketId,
+    string? afterGoodId,
+    long? expectedSystemRevision,
+    int? pageSize,
+    CoordinatorMarketClient market,
+    HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    var request = new MarketSnapshotReadRequestV1
+    {
+        CorrelationId = Guid.NewGuid(),
+        SystemId = systemId,
+        AfterMarketId = afterMarketId,
+        AfterGoodId = afterGoodId,
+        ExpectedSystemRevision = expectedSystemRevision,
+        PageSize = pageSize ?? 100
+    };
+    if (!request.IsValid())
+        return Results.BadRequest(new { error = "invalid_market_snapshot_request" });
+
+    var result = await market.ReadSystemAsync(request, cancellationToken);
+    if (result.Snapshot is not { } snapshot || !snapshot.IsValidFor(request))
+        return Results.StatusCode(result.StatusCode is null or HttpStatusCode.ServiceUnavailable
+            ? StatusCodes.Status503ServiceUnavailable
+            : StatusCodes.Status502BadGateway);
+
+    if (snapshot.Status == MarketSnapshotReadStatusV1.RevisionExpired)
+        return Results.Conflict(snapshot);
+
+    context.Response.Headers.CacheControl = "public, max-age=5";
+    context.Response.Headers.ETag = $"\"market-{snapshot.SystemId}-{snapshot.SystemRevision}-{request.AfterMarketId ?? "first"}-{request.AfterGoodId ?? "first"}-{request.PageSize}\"";
+    if (context.Request.Headers.IfNoneMatch == context.Response.Headers.ETag)
+        return Results.StatusCode(StatusCodes.Status304NotModified);
+    return Results.Ok(snapshot);
+}).RequireRateLimiting("market-read");
 
 app.MapPost("/api/v1/client/version", (ClientVersionHello hello, ClientVersionHandshake handshake) =>
 {
