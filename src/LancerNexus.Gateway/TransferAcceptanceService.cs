@@ -84,7 +84,7 @@ public sealed class TransferAcceptanceService(
         {
             lease = await accounts.CommitCharacterLeaseTransferAsync(
                 claims.TransferId, claims.SessionId, claims.CharacterId, claims.SourceInstanceId,
-                claims.TargetInstanceId, claims.LeaseVersion, SHA256.HashData(leaseToken),
+                claims.TargetInstanceId, claims.TargetSystemId, claims.LeaseVersion, SHA256.HashData(leaseToken),
                 now.AddSeconds(leaseLifetimeSeconds), now, cancellationToken);
         }
         catch (Exception exception) when (exception is InvalidOperationException or MySqlException)

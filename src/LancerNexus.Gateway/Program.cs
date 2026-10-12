@@ -569,6 +569,100 @@ app.MapGet("/api/v1/characters", async (
     }
 });
 
+app.MapPost("/api/v1/characters/list", async (
+    CharacterRosterRequestV1 request,
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    IAccountRepository accounts,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_roster_request" });
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization, sessionTokens, DateTime.UtcNow);
+    if (authorization.ConfigurationError) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted || authorization.Claims is not { } claims ||
+        claims.AccountId != request.AccountId || claims.SessionId != request.SessionId)
+        return Results.Unauthorized();
+
+    try
+    {
+        var roster = await accounts.ListActiveCharactersForSessionAsync(claims.AccountId, claims.SessionId,
+            timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+        if (!roster.SessionAccepted) return Results.Unauthorized();
+        var response = new CharacterRosterResultV1
+        {
+            CorrelationId = request.CorrelationId,
+            Accepted = true,
+            ReasonCode = "listed",
+            Characters = roster.Characters.Select(character => new CharacterRosterEntryV1
+            {
+                CharacterId = character.CharacterId,
+                DisplayName = character.DisplayName,
+                SystemId = character.SystemId
+            }).ToArray()
+        };
+        return response.IsValid() ? Results.Ok(response) : Results.StatusCode(StatusCodes.Status502BadGateway);
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireRateLimiting("character-snapshot");
+
+app.MapPost("/api/v1/characters/system/recover", async (
+    CharacterSystemMetadataRecoveryRequestV1 request,
+    HttpContext context,
+    SessionTokenCodec sessionTokens,
+    ICharacterSaveSnapshotStore snapshots,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (!request.IsValid()) return Results.BadRequest(new { error = "invalid_character_system_recovery_request" });
+    var authorization = SessionAuthorization.AuthorizeToken(
+        context.Request.Headers.Authorization, sessionTokens, timeProvider.GetUtcNow().UtcDateTime);
+    if (authorization.ConfigurationError) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    if (!authorization.Accepted || authorization.Claims is not { } claims ||
+        claims.AccountId != request.AccountId || claims.SessionId != request.SessionId)
+        return Results.Unauthorized();
+
+    var stored = await snapshots.RecoverSystemMetadataAsync(request, timeProvider.GetUtcNow().UtcDateTime,
+        cancellationToken);
+    var response = new CharacterSystemMetadataRecoveryResultV1
+    {
+        CorrelationId = request.CorrelationId,
+        CharacterId = request.CharacterId,
+        Accepted = stored.Status is CharacterSystemMetadataRecoveryStatus.Recovered or
+            CharacterSystemMetadataRecoveryStatus.AlreadyKnown,
+        ReasonCode = stored.Status switch
+        {
+            CharacterSystemMetadataRecoveryStatus.Recovered => "recovered",
+            CharacterSystemMetadataRecoveryStatus.AlreadyKnown => "already_known",
+            CharacterSystemMetadataRecoveryStatus.SessionRejected => "session_rejected",
+            CharacterSystemMetadataRecoveryStatus.CharacterNotFound => "character_not_found",
+            CharacterSystemMetadataRecoveryStatus.SnapshotMissing => "snapshot_missing",
+            CharacterSystemMetadataRecoveryStatus.SystemUnknown => "system_unknown",
+            CharacterSystemMetadataRecoveryStatus.SnapshotInvalid => "snapshot_invalid",
+            _ => "unavailable"
+        },
+        SystemId = stored.Status is CharacterSystemMetadataRecoveryStatus.Recovered or
+            CharacterSystemMetadataRecoveryStatus.AlreadyKnown ? stored.SystemId : null
+    };
+    if (!response.IsValid()) return Results.StatusCode(StatusCodes.Status502BadGateway);
+    return stored.Status switch
+    {
+        CharacterSystemMetadataRecoveryStatus.Recovered or CharacterSystemMetadataRecoveryStatus.AlreadyKnown =>
+            Results.Ok(response),
+        CharacterSystemMetadataRecoveryStatus.SessionRejected => Results.Unauthorized(),
+        CharacterSystemMetadataRecoveryStatus.CharacterNotFound => Results.NotFound(response),
+        CharacterSystemMetadataRecoveryStatus.SnapshotMissing or CharacterSystemMetadataRecoveryStatus.SystemUnknown or
+            CharacterSystemMetadataRecoveryStatus.SnapshotInvalid => Results.Conflict(response),
+        _ => Results.StatusCode(StatusCodes.Status503ServiceUnavailable)
+    };
+}).RequireRateLimiting("character-snapshot");
+
 app.MapGet("/api/v1/characters/{characterId:long}/faction-reputation", async (
     long characterId,
     HttpContext context,
@@ -813,7 +907,8 @@ app.MapPost("/api/v1/game/characters/list", async (
             Characters = result.Characters.Select(character => new CharacterRosterEntryV1
             {
                 CharacterId = character.CharacterId,
-                DisplayName = character.DisplayName
+                DisplayName = character.DisplayName,
+                SystemId = character.SystemId
             }).ToArray()
         };
         return response.IsValid() ? Results.Ok(response) : Results.StatusCode(StatusCodes.Status502BadGateway);
@@ -1455,6 +1550,7 @@ async Task<IResult> HandlePlacement(
     LancerNexus.Gateway.SessionTokenCodec sessionTokens,
     LancerNexus.Gateway.JoinTicketCodec joinTickets,
     LancerNexus.Gateway.IAccountRepository accounts,
+    TimeProvider timeProvider,
     CancellationToken cancellationToken)
 {
     var authorization = SessionAuthorization.Authorize(
@@ -1468,17 +1564,36 @@ async Task<IResult> HandlePlacement(
         return Results.Unauthorized();
     if (!request.IsValid())
         return Results.BadRequest(new { error = "invalid_placement_request" });
+    try
+    {
+        var session = await accounts.FindActiveSessionAsync(authorization.Claims!.SessionId,
+            authorization.Claims.AccountId, timeProvider.GetUtcNow().UtcDateTime, cancellationToken);
+        if (session is null)
+            return Results.Unauthorized();
+    }
+    catch (Exception error) when (error is MySqlException or InvalidOperationException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+    CharacterRecord? selectedCharacter = null;
     if (request.CharacterId is { } characterId)
     {
         try
         {
-            if (await accounts.FindCharacterAsync(authorization.Claims!.AccountId, characterId, cancellationToken) is null)
-                return Results.NotFound(new { error = "character_not_found" });
+            selectedCharacter = await accounts.FindCharacterAsync(authorization.Claims!.AccountId,
+                characterId, cancellationToken);
         }
-        catch (InvalidOperationException)
+        catch (Exception error) when (error is MySqlException or InvalidOperationException)
         {
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
+        if (!CharacterPlacementTarget.TryResolve(request, selectedCharacter, out request, out var reasonCode))
+            return reasonCode switch
+            {
+                "character_not_found" => Results.NotFound(new { error = reasonCode }),
+                "character_system_unknown" => Results.Conflict(new { error = reasonCode }),
+                _ => Results.BadRequest(new { error = "invalid_character_placement" })
+            };
     }
 
     var result = await coordinator.PlaceAsync(request, cancellationToken);

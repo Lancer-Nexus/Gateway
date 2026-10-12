@@ -10,6 +10,8 @@ namespace LancerNexus.Gateway.Tests;
 
 public sealed class MySqlCharacterSaveSnapshotTests
 {
+    private const long LegacyCharacterId = 900_000_000_001;
+
     [MySqlFact]
     public async Task SnapshotIsEncryptedRevisionedIdempotentAndLeaseFenced()
     {
@@ -26,7 +28,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql", "008_character_tombstones.sql" })
+            foreach (var migrationName in new[] { "001_identity_and_leases.sql", "006_character_save_snapshots.sql", "008_character_tombstones.sql", "010_character_snapshot_system_metadata.sql" })
             {
                 var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
                     "db", "migrations", migrationName));
@@ -79,7 +81,20 @@ public sealed class MySqlCharacterSaveSnapshotTests
             Assert.Equal("resolved", identity.ReasonCode);
             Assert.True(identity.CharacterId > 73);
             Assert.Equal(identity.CharacterId, identityRetry.CharacterId);
+            await using (var legacyCharacter = connection.CreateCommand())
+            {
+                legacyCharacter.CommandText = """
+                    INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
+                    VALUES (@legacy_character, @account, 'LegacyPilot', @now, @now);
+                    """;
+                legacyCharacter.Parameters.AddWithValue("@legacy_character", LegacyCharacterId);
+                legacyCharacter.Parameters.AddWithValue("@account", account.ToString("D"));
+                legacyCharacter.Parameters.AddWithValue("@now", now);
+                await legacyCharacter.ExecuteNonQueryAsync();
+            }
             Assert.True((await leases.AcquireCharacterLeaseAsync(account, session, 73, "li-01",
+                SHA256.HashData(token1), now.AddMinutes(15), now)).Accepted);
+            Assert.True((await leases.AcquireCharacterLeaseAsync(account, session, LegacyCharacterId, "li-01",
                 SHA256.HashData(token1), now.AddMinutes(15), now)).Accepted);
             var renewedLease = await leases.RenewCharacterLeaseAsync(73, "li-01", SHA256.HashData(token1),
                 1, now.AddMinutes(30), now.AddMinutes(1));
@@ -91,6 +106,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
             Assert.False(staleRenewal.Accepted);
             Assert.Equal("character_lease_rejected", staleRenewal.ReasonCode);
             var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+            var hash1 = SHA256.HashData(token1);
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Gateway:TransferSnapshotCurrentKeyId"] = "test-key",
@@ -98,17 +114,39 @@ public sealed class MySqlCharacterSaveSnapshotTests
             }).Build();
             var protection = new TransferSnapshotProtection(configuration);
             var store = new MySqlCharacterSaveSnapshotStore(databaseConfig.ConnectionString, protection);
+            var legacyPayload = Encoding.UTF8.GetBytes("[Player]\nsystem = Li03\n");
+            var legacySnapshot = await store.WriteAsync("li-01", hash1,
+                WriteRequest(token1, 1, 1, legacyPayload, characterId: LegacyCharacterId), now);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, legacySnapshot.Status);
+            var recoveryRequest = new CharacterSystemMetadataRecoveryRequestV1
+            {
+                CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session,
+                CharacterId = LegacyCharacterId
+            };
+            var recovered = await store.RecoverSystemMetadataAsync(recoveryRequest, now);
+            Assert.Equal(CharacterSystemMetadataRecoveryStatus.Recovered, recovered.Status);
+            Assert.Equal("li03", recovered.SystemId);
+            var repeatedRecovery = await store.RecoverSystemMetadataAsync(recoveryRequest with
+            {
+                CorrelationId = Guid.NewGuid()
+            }, now);
+            Assert.Equal(CharacterSystemMetadataRecoveryStatus.AlreadyKnown, repeatedRecovery.Status);
+            Assert.Equal("li03", repeatedRecovery.SystemId);
+            var rosterAfterRecovery = await leases.ListActiveCharactersForSessionAsync(account, session, now);
+            Assert.Equal("li03", Assert.Single(rosterAfterRecovery.Characters,
+                character => character.CharacterId == LegacyCharacterId).SystemId);
             var write = WriteRequest(token1, 1, 1, Encoding.Latin1.GetBytes("""
                 [Player]
                 house = 0.625, li_n_grp
                 house = -0.25, fc_rh_grp
-                """));
-            var hash1 = SHA256.HashData(token1);
-
+                """), "li01");
             var stored = await store.WriteAsync("li-01", hash1, write, now);
             var duplicate = await store.WriteAsync("li-01", hash1, write, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, stored.Status);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Duplicate, duplicate.Status);
+            var conflictingLocationRetry = await store.WriteAsync("li-01", hash1,
+                write with { SystemId = "li02" }, now);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Conflict, conflictingLocationRetry.Status);
 
             var read = await store.ReadAsync("li-01", hash1, new CharacterSaveSnapshotReadRequestV1
             {
@@ -119,6 +157,7 @@ public sealed class MySqlCharacterSaveSnapshotTests
             }, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, read.Status);
             Assert.Equal(write.Payload, read.Snapshot!.Payload);
+            Assert.Equal("li01", read.Snapshot.SystemId);
 
             var reputation = await store.ReadFactionReputationAsync(account, session, 73, now);
             Assert.Equal(CharacterFactionReputationReadStatus.Found, reputation.Status);
@@ -174,12 +213,30 @@ public sealed class MySqlCharacterSaveSnapshotTests
                 "li-01", hash1, 73, 1, now);
             Assert.Equal(CharacterFactionReputationReadStatus.LeaseRejected, staleLeaseReputation.Status);
             var current = await store.WriteAsync("li-02", SHA256.HashData(token2),
-                WriteRequest(token2, 2, 2, write.Payload), now);
+                WriteRequest(token2, 2, 2, write.Payload, "li03"), now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, current.Status);
+            var currentSnapshot = await store.ReadAsync("li-02", SHA256.HashData(token2),
+                new CharacterSaveSnapshotReadRequestV1
+                {
+                    CorrelationId = Guid.NewGuid(), CharacterId = 73,
+                    LeaseToken = Encode(token2), LeaseVersion = 2
+                }, now);
+            Assert.Equal("li03", currentSnapshot.Snapshot!.SystemId);
             var currentLeaseReputation = await store.ReadFactionReputationForLeaseAsync(
                 "li-02", SHA256.HashData(token2), 73, 2, now);
             Assert.Equal(CharacterFactionReputationReadStatus.Found, currentLeaseReputation.Status);
             Assert.Equal(2, currentLeaseReputation.ReputationRevision);
+
+            var legacyWrite = await store.WriteAsync("li-02", SHA256.HashData(token2),
+                WriteRequest(token2, 2, 3, [41]), now);
+            Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, legacyWrite.Status);
+            var afterLegacyWrite = await store.ReadAsync("li-02", SHA256.HashData(token2),
+                new CharacterSaveSnapshotReadRequestV1
+                {
+                    CorrelationId = Guid.NewGuid(), CharacterId = 73,
+                    LeaseToken = Encode(token2), LeaseVersion = 2
+                }, now);
+            Assert.Equal("li03", afterLegacyWrite.Snapshot!.SystemId);
 
             await using (var revoke = connection.CreateCommand())
             {
@@ -202,14 +259,16 @@ public sealed class MySqlCharacterSaveSnapshotTests
         }
     }
 
-    private static CharacterSaveSnapshotWriteRequestV1 WriteRequest(byte[] token, long fence, long revision, byte[] payload) => new()
+    private static CharacterSaveSnapshotWriteRequestV1 WriteRequest(byte[] token, long fence, long revision,
+        byte[] payload, string? systemId = null, long characterId = 73) => new()
     {
         CorrelationId = Guid.NewGuid(),
-        CharacterId = 73,
+        CharacterId = characterId,
         LeaseToken = Encode(token),
         LeaseVersion = fence,
         Revision = revision,
-        Payload = payload
+        Payload = payload,
+        SystemId = systemId
     };
 
     private static string Encode(byte[] token) => Convert.ToBase64String(token).TrimEnd('=').Replace('+', '-').Replace('/', '_');

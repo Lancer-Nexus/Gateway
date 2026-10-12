@@ -30,7 +30,7 @@ public sealed class MySqlCharacterRosterDeletionTests
                          "001_identity_and_leases.sql", "003_character_lease_transfers.sql",
                          "004_character_transfer_snapshots.sql", "005_character_transfer_decisions.sql",
                          "006_character_save_snapshots.sql", "007_character_identity_allocation.sql",
-                         "008_character_tombstones.sql"
+                         "008_character_tombstones.sql", "010_character_snapshot_system_metadata.sql"
                      })
             {
                 var migration = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
@@ -120,7 +120,8 @@ public sealed class MySqlCharacterRosterDeletionTests
                 AccountId = account,
                 SessionId = session,
                 CharacterId = 76,
-                Payload = bootstrapPayload
+                Payload = bootstrapPayload,
+                SystemId = "li03"
             };
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored,
                 (await snapshots.BootstrapAsync(bootstrap, now)).Status);
@@ -136,6 +137,7 @@ public sealed class MySqlCharacterRosterDeletionTests
             var preview = await snapshots.ReadPreviewAsync(previewRequest, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, preview.Status);
             Assert.Equal(bootstrapPayload, preview.Snapshot!.Payload);
+            Assert.Equal("li03", preview.Snapshot.SystemId);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.SessionRejected,
                 (await snapshots.ReadPreviewAsync(previewRequest with { SessionId = Guid.NewGuid() }, now)).Status);
 
@@ -152,6 +154,7 @@ public sealed class MySqlCharacterRosterDeletionTests
                 }, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, bootstrappedRead.Status);
             Assert.Equal(bootstrapPayload, bootstrappedRead.Snapshot!.Payload);
+            Assert.Equal("li03", bootstrappedRead.Snapshot.SystemId);
 
             await using var history = connection.CreateCommand();
             history.CommandText = "SELECT COUNT(*) FROM character_save_snapshots WHERE character_id = 75;";

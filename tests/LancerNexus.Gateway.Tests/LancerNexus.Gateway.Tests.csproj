@@ -13,7 +13,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="../../db/migrations/001_identity_and_leases.sql;../../db/migrations/003_character_lease_transfers.sql;../../db/migrations/004_character_transfer_snapshots.sql;../../db/migrations/005_character_transfer_decisions.sql;../../db/migrations/006_character_save_snapshots.sql;../../db/migrations/007_character_identity_allocation.sql;../../db/migrations/008_character_tombstones.sql;../../db/migrations/009_market_trade_intents.sql"
+    <None Include="../../db/migrations/001_identity_and_leases.sql;../../db/migrations/003_character_lease_transfers.sql;../../db/migrations/004_character_transfer_snapshots.sql;../../db/migrations/005_character_transfer_decisions.sql;../../db/migrations/006_character_save_snapshots.sql;../../db/migrations/007_character_identity_allocation.sql;../../db/migrations/008_character_tombstones.sql;../../db/migrations/009_market_trade_intents.sql;../../db/migrations/010_character_snapshot_system_metadata.sql"
           Link="db/migrations/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

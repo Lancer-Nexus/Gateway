@@ -32,7 +32,8 @@ public sealed class MySqlMarketTradeCommitStoreTests
             foreach (var name in new[]
                      {
                          "001_identity_and_leases.sql", "006_character_save_snapshots.sql",
-                         "008_character_tombstones.sql", "009_market_trade_intents.sql"
+                         "008_character_tombstones.sql", "009_market_trade_intents.sql",
+                         "010_character_snapshot_system_metadata.sql"
                      })
             {
                 var text = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,

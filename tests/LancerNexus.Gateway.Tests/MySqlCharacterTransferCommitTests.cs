@@ -23,7 +23,7 @@ public sealed class MySqlCharacterTransferCommitTests
         {
             await using var connection = new MySqlConnection(databaseConfig.ConnectionString);
             await connection.OpenAsync();
-            foreach (var migration in new[] { "001_identity_and_leases.sql", "003_character_lease_transfers.sql", "005_character_transfer_decisions.sql", "008_character_tombstones.sql" })
+            foreach (var migration in new[] { "001_identity_and_leases.sql", "003_character_lease_transfers.sql", "005_character_transfer_decisions.sql", "006_character_save_snapshots.sql", "008_character_tombstones.sql", "010_character_snapshot_system_metadata.sql" })
             {
                 var path = Path.Combine(AppContext.BaseDirectory, "db", "migrations", migration);
                 foreach (var statement in (await File.ReadAllTextAsync(path))
@@ -46,11 +46,17 @@ public sealed class MySqlCharacterTransferCommitTests
                     INSERT INTO gateway_sessions VALUES (@session, @account, @hash, @now, @now, @expiry, NULL);
                     INSERT INTO characters (character_id, account_id, display_name, created_at_utc, updated_at_utc)
                     VALUES (73, @account, 'TransferTest', @now, @now);
+                    INSERT INTO character_save_snapshots
+                        (character_id, snapshot_revision, lease_version, schema_version, system_id, key_id,
+                         snapshot_hash, protected_snapshot, updated_at_utc)
+                    VALUES (73, 1, 14, 1, 'li01', 'test-key', @snapshot_hash, @snapshot, @now);
                     INSERT INTO character_leases VALUES (73, @session, 'source-01', @hash, 14, @expiry);
                     """;
                 seed.Parameters.AddWithValue("@account", account.ToString("D"));
                 seed.Parameters.AddWithValue("@session", session.ToString("D"));
                 seed.Parameters.AddWithValue("@hash", new byte[32]);
+                seed.Parameters.AddWithValue("@snapshot_hash", new byte[32]);
+                seed.Parameters.AddWithValue("@snapshot", new byte[] { 1 });
                 seed.Parameters.AddWithValue("@now", now);
                 seed.Parameters.AddWithValue("@expiry", now.AddMinutes(5));
                 await seed.ExecuteNonQueryAsync();
@@ -63,17 +69,18 @@ public sealed class MySqlCharacterTransferCommitTests
             Assert.Null(await repository.FindCharacterLeaseTransferCommitAsync(transfer));
             Assert.Null(await repository.FindCharacterLeaseTransferCommitAsync(Guid.Empty));
             var committed = await repository.CommitCharacterLeaseTransferAsync(transfer, session, 73,
-                "source-01", "target-01", 14, new byte[32], now.AddMinutes(5), now);
+                "source-01", "target-01", "li03", 14, new byte[32], now.AddMinutes(5), now);
             Assert.True(committed.Accepted);
             Assert.Equal(15, committed.LeaseVersion);
             var expected = new CharacterLeaseTransferCommitRecord(transfer, session, 73,
                 "source-01", "target-01", 14, 15);
             repository = new MySqlAccountRepository(databaseConfig.ConnectionString);
             Assert.Equal("target-01", (await repository.FindActiveCharacterTargetLeaseAsync(73, now))?.InstanceId);
+            Assert.Equal("li03", (await repository.FindCharacterAsync(account, 73))?.SystemId);
             Assert.Equal(expected, await repository.FindCharacterLeaseTransferCommitAsync(transfer));
 
             var replay = await repository.CommitCharacterLeaseTransferAsync(transfer, session, 73,
-                "source-01", "target-01", 14, new byte[32], now.AddMinutes(5), now);
+                "source-01", "target-01", "li03", 14, new byte[32], now.AddMinutes(5), now);
             Assert.True(replay.Accepted);
             Assert.Equal("duplicate", replay.ReasonCode);
             Assert.Equal(15, replay.LeaseVersion);
@@ -98,9 +105,10 @@ public sealed class MySqlCharacterTransferCommitTests
 
             // A later handoff must not erase the historical commit decision.
             var next = await repository.CommitCharacterLeaseTransferAsync(Guid.NewGuid(), session, 73,
-                "target-01", "source-01", 15, new byte[32], now.AddMinutes(5), now);
+                "target-01", "source-01", "li01", 15, new byte[32], now.AddMinutes(5), now);
             Assert.True(next.Accepted);
             Assert.Equal(16, next.LeaseVersion);
+            Assert.Equal("li01", (await repository.FindCharacterAsync(account, 73))?.SystemId);
 
             var abortBinding = new CharacterTransferBinding(Guid.NewGuid(), session, 73, "source-01", "target-01", 16);
             Assert.True((await repository.AbortCharacterLeaseTransferAsync(abortBinding, now)).Accepted);

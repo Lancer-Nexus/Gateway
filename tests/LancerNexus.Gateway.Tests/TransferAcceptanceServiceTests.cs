@@ -22,6 +22,7 @@ public sealed class TransferAcceptanceServiceTests
         Assert.Equal(1, fixture.Accounts.CommitCalls);
         Assert.Equal(14, fixture.Accounts.ExpectedLeaseVersion);
         Assert.Equal("li02-instance", fixture.Accounts.TargetInstanceId);
+        Assert.Equal("li02", fixture.Accounts.TargetSystemId);
     }
 
     [Fact]
@@ -174,6 +175,7 @@ public sealed class TransferAcceptanceServiceTests
         public int CommitCalls { get; private set; }
         public long ExpectedLeaseVersion { get; private set; }
         public string? TargetInstanceId { get; private set; }
+        public string? TargetSystemId { get; private set; }
 
         public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
             long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
@@ -188,6 +190,17 @@ public sealed class TransferAcceptanceServiceTests
             committedTokenHash ??= targetLeaseTokenHash;
             return Task.FromResult(new CharacterLeaseTransferResult(true,
                 CommitCalls == 1 ? "committed" : "duplicate", 15));
+        }
+
+        public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+            long characterId, string sourceInstanceId, string targetInstanceId, string targetSystemId,
+            long expectedLeaseVersion, byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+            CancellationToken cancellationToken = default)
+        {
+            TargetSystemId = targetSystemId;
+            return CommitCharacterLeaseTransferAsync(transferId, sessionId, characterId, sourceInstanceId,
+                targetInstanceId, expectedLeaseVersion, targetLeaseTokenHash, validUntilUtc, nowUtc,
+                cancellationToken);
         }
 
         public Task<AccountRecord?> FindByEmailAsync(string email, CancellationToken cancellationToken = default) => throw new NotSupportedException();

@@ -11,7 +11,8 @@ public sealed record AccountRecord(
     string Status);
 
 public sealed record SessionRecord(Guid AccountId, DateTime ExpiresAtUtc);
-public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc);
+public sealed record CharacterRecord(long CharacterId, string DisplayName, DateTime CreatedAtUtc,
+    string? SystemId = null);
 public sealed record CharacterRosterStoreResult(bool SessionAccepted, IReadOnlyList<CharacterRecord> Characters);
 public sealed record CharacterDeletionStoreResult(string ReasonCode);
 public sealed record CharacterIdentityResolveStoreResult(bool Accepted, string ReasonCode, long? CharacterId);
@@ -82,6 +83,13 @@ public interface IAccountRepository
         long characterId, string sourceInstanceId, string targetInstanceId, long expectedLeaseVersion,
         byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default);
+    Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(Guid transferId, Guid sessionId,
+        long characterId, string sourceInstanceId, string targetInstanceId, string targetSystemId,
+        long expectedLeaseVersion, byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        CommitCharacterLeaseTransferAsync(transferId, sessionId, characterId, sourceInstanceId,
+            targetInstanceId, expectedLeaseVersion, targetLeaseTokenHash, validUntilUtc, nowUtc,
+            cancellationToken);
     Task<CharacterLeaseAcquireResult> RenewCharacterLeaseAsync(long characterId, string instanceId,
         byte[] leaseTokenHash, long leaseVersion, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
@@ -683,17 +691,19 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT character_id, display_name, created_at_utc
-            FROM characters
-            WHERE account_id = @account_id
-              AND deleted_at_utc IS NULL
-            ORDER BY character_id;
+            SELECT c.character_id, c.display_name, c.created_at_utc, s.system_id
+            FROM characters c
+            LEFT JOIN character_save_snapshots s ON s.character_id = c.character_id
+            WHERE c.account_id = @account_id
+              AND c.deleted_at_utc IS NULL
+            ORDER BY c.character_id;
             """;
         command.Parameters.AddWithValue("@account_id", accountId.ToString());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var characters = new List<CharacterRecord>();
         while (await reader.ReadAsync(cancellationToken))
-            characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
+            characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         return characters;
     }
 
@@ -728,13 +738,16 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         {
             command.Transaction = transaction;
             command.CommandText = """
-                SELECT character_id, display_name, created_at_utc FROM characters
-                WHERE account_id = @account_id AND deleted_at_utc IS NULL ORDER BY character_id;
+                SELECT c.character_id, c.display_name, c.created_at_utc, s.system_id
+                FROM characters c
+                LEFT JOIN character_save_snapshots s ON s.character_id = c.character_id
+                WHERE c.account_id = @account_id AND c.deleted_at_utc IS NULL ORDER BY c.character_id;
                 """;
             command.Parameters.AddWithValue("@account_id", accountId.ToString("D"));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
-                characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2)));
+                characters.Add(new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
         await transaction.CommitAsync(cancellationToken);
         return new(true, characters);
@@ -922,9 +935,10 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT character_id, display_name, created_at_utc
-            FROM characters
-            WHERE account_id = @account_id AND character_id = @character_id AND deleted_at_utc IS NULL
+            SELECT c.character_id, c.display_name, c.created_at_utc, s.system_id
+            FROM characters c
+            LEFT JOIN character_save_snapshots s ON s.character_id = c.character_id
+            WHERE c.account_id = @account_id AND c.character_id = @character_id AND c.deleted_at_utc IS NULL
             LIMIT 1;
             """;
         command.Parameters.AddWithValue("@account_id", accountId.ToString());
@@ -932,7 +946,8 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return null;
-        return new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2));
+        return new CharacterRecord(reader.GetInt64(0), reader.GetString(1), reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3));
     }
 
     public async Task<CharacterLeaseRecord?> FindActiveCharacterLeaseAsync(
@@ -971,6 +986,22 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
         Guid transferId, Guid sessionId, long characterId, string sourceInstanceId, string targetInstanceId,
         long expectedLeaseVersion, byte[] targetLeaseTokenHash, DateTime validUntilUtc, DateTime nowUtc,
         CancellationToken cancellationToken = default)
+        => await CommitCharacterLeaseTransferCoreAsync(transferId, sessionId, characterId, sourceInstanceId,
+            targetInstanceId, null, expectedLeaseVersion, targetLeaseTokenHash, validUntilUtc, nowUtc,
+            cancellationToken);
+
+    public Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferAsync(
+        Guid transferId, Guid sessionId, long characterId, string sourceInstanceId, string targetInstanceId,
+        string targetSystemId, long expectedLeaseVersion, byte[] targetLeaseTokenHash,
+        DateTime validUntilUtc, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+        CommitCharacterLeaseTransferCoreAsync(transferId, sessionId, characterId, sourceInstanceId,
+            targetInstanceId, targetSystemId, expectedLeaseVersion, targetLeaseTokenHash, validUntilUtc,
+            nowUtc, cancellationToken);
+
+    private async Task<CharacterLeaseTransferResult> CommitCharacterLeaseTransferCoreAsync(
+        Guid transferId, Guid sessionId, long characterId, string sourceInstanceId, string targetInstanceId,
+        string? targetSystemId, long expectedLeaseVersion, byte[] targetLeaseTokenHash,
+        DateTime validUntilUtc, DateTime nowUtc, CancellationToken cancellationToken)
     {
         if (transferId == Guid.Empty || sessionId == Guid.Empty || characterId <= 0 ||
             expectedLeaseVersion <= 0 || expectedLeaseVersion == long.MaxValue ||
@@ -978,6 +1009,7 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
             string.IsNullOrWhiteSpace(targetInstanceId) ||
             sourceInstanceId.Length > 96 || targetInstanceId.Length > 96 ||
             string.Equals(sourceInstanceId, targetInstanceId, StringComparison.Ordinal) ||
+            (targetSystemId is not null && !AdminQuery.ValidIdentifier(targetSystemId)) ||
             targetLeaseTokenHash.Length != 32 || validUntilUtc <= nowUtc)
             return new CharacterLeaseTransferResult(false, "invalid_transfer", null);
 
@@ -1082,6 +1114,16 @@ public sealed partial class MySqlAccountRepository(string connectionString) : IA
                 await transaction.RollbackAsync(cancellationToken);
                 return new CharacterLeaseTransferResult(false, "lease_fence_rejected", null);
             }
+        }
+
+        if (targetSystemId is not null)
+        {
+            await using var location = connection.CreateCommand();
+            location.Transaction = transaction;
+            location.CommandText = "UPDATE character_save_snapshots SET system_id = @system_id WHERE character_id = @character_id;";
+            location.Parameters.AddWithValue("@system_id", targetSystemId.ToLowerInvariant());
+            location.Parameters.AddWithValue("@character_id", characterId);
+            await location.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using (var record = connection.CreateCommand())
