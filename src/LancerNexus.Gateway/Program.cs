@@ -1466,9 +1466,7 @@ async Task<IResult> HandlePlacement(
         return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     if (!authorization.Accepted)
         return Results.Unauthorized();
-    if (request.RequestId == Guid.Empty || request.SessionId == Guid.Empty ||
-        string.IsNullOrWhiteSpace(request.TargetSystem) ||
-        string.IsNullOrWhiteSpace(request.IdempotencyKey))
+    if (!request.IsValid())
         return Results.BadRequest(new { error = "invalid_placement_request" });
     if (request.CharacterId is { } characterId)
     {
