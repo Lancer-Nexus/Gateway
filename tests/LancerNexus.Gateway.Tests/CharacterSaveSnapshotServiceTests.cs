@@ -44,8 +44,12 @@ public sealed class CharacterSaveSnapshotServiceTests
 
     private static CharacterSaveSnapshotWriteRequestV1 ValidWrite() => new()
     {
-        CorrelationId = Guid.NewGuid(), CharacterId = 44, LeaseToken = LeaseToken,
-        LeaseVersion = 3, Revision = 4, Payload = [1, 2, 3]
+        CorrelationId = Guid.NewGuid(),
+        CharacterId = 44,
+        LeaseToken = LeaseToken,
+        LeaseVersion = 3,
+        Revision = 4,
+        Payload = [1, 2, 3]
     };
 
     private sealed class SnapshotStore(CharacterSaveSnapshotStoreResult result) : ICharacterSaveSnapshotStore

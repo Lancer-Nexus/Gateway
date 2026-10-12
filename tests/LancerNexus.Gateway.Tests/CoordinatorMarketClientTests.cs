@@ -21,7 +21,8 @@ public sealed class CoordinatorMarketClientTests
                 TimeSpan.FromSeconds(5), tradeKey));
         var request = new MarketTradeResolutionRequestV1
         {
-            CorrelationId = Guid.NewGuid(), TradeId = Guid.NewGuid(),
+            CorrelationId = Guid.NewGuid(),
+            TradeId = Guid.NewGuid(),
             Resolution = MarketTradeResolutionV1.Commit
         };
 
@@ -48,11 +49,20 @@ public sealed class CoordinatorMarketClientTests
                 TimeSpan.FromSeconds(5), tradeKey));
         var request = new MarketTradeQuoteReservationRequestV1
         {
-            CorrelationId = Guid.NewGuid(), TradeId = Guid.NewGuid(), MarketId = "li01_base",
-            SystemId = "li-01", GoodId = "commodity_food", Side = MarketTradeSideV1.Buy,
-            Quantity = 2, ExpectedMarketRevision = 7, ExpectedReputationRevision = 9,
-            ReputationPriceFactorPartsPerMillion = 950_000, ExpectedQuoteUnitPrice = 95,
-            ExpectedTotalPrice = 190, CharacterId = 42, MarketFactionId = "li_grp"
+            CorrelationId = Guid.NewGuid(),
+            TradeId = Guid.NewGuid(),
+            MarketId = "li01_base",
+            SystemId = "li-01",
+            GoodId = "commodity_food",
+            Side = MarketTradeSideV1.Buy,
+            Quantity = 2,
+            ExpectedMarketRevision = 7,
+            ExpectedReputationRevision = 9,
+            ReputationPriceFactorPartsPerMillion = 950_000,
+            ExpectedQuoteUnitPrice = 95,
+            ExpectedTotalPrice = 190,
+            CharacterId = 42,
+            MarketFactionId = "li_grp"
         };
 
         var result = await client.ReserveQuoteAsync(request);
@@ -78,9 +88,15 @@ public sealed class CoordinatorMarketClientTests
                 TimeSpan.FromSeconds(5)));
         var request = new MarketQuoteRequestV1
         {
-            CorrelationId = Guid.NewGuid(), CharacterId = 42, SystemId = "li-01",
-            MarketId = "li01_base", GoodId = "commodity_food", Side = MarketTradeSideV1.Buy,
-            Quantity = 2, ExpectedMarketRevision = 7, ExpectedReputationRevision = 9
+            CorrelationId = Guid.NewGuid(),
+            CharacterId = 42,
+            SystemId = "li-01",
+            MarketId = "li01_base",
+            GoodId = "commodity_food",
+            Side = MarketTradeSideV1.Buy,
+            Quantity = 2,
+            ExpectedMarketRevision = 7,
+            ExpectedReputationRevision = 9
         };
 
         var result = await client.ReadQuoteAsync(request);
@@ -130,8 +146,12 @@ public sealed class CoordinatorMarketClientTests
                 TimeSpan.FromSeconds(5)));
         var request = new MarketGoodReadRequestV1
         {
-            CorrelationId = Guid.NewGuid(), SystemId = "li-01", MarketId = "li01_base",
-            GoodId = "commodity_food", ExpectedSystemRevision = 7, ExpectedMarketRevision = 3
+            CorrelationId = Guid.NewGuid(),
+            SystemId = "li-01",
+            MarketId = "li01_base",
+            GoodId = "commodity_food",
+            ExpectedSystemRevision = 7,
+            ExpectedMarketRevision = 3
         };
 
         var result = await client.ReadGoodAsync(request);
@@ -410,18 +430,27 @@ public sealed class CoordinatorMarketClientTests
             ForwardedRequest = await request.Content!.ReadFromJsonAsync<MarketGoodReadRequestV1>(cancellationToken);
             var good = new MarketGoodSnapshotV1
             {
-                MarketId = ForwardedRequest!.MarketId, SystemId = ForwardedRequest.SystemId,
-                GoodId = ForwardedRequest.GoodId, BaseUnitPrice = 100, CurrentUnitPrice = 110,
-                AvailableStock = 6, TargetStock = 10, BuyEnabled = true, SellEnabled = false,
+                MarketId = ForwardedRequest!.MarketId,
+                SystemId = ForwardedRequest.SystemId,
+                GoodId = ForwardedRequest.GoodId,
+                BaseUnitPrice = 100,
+                CurrentUnitPrice = 110,
+                AvailableStock = 6,
+                TargetStock = 10,
+                BuyEnabled = true,
+                SellEnabled = false,
                 MarketRevision = ForwardedRequest.ExpectedMarketRevision ?? 3
             };
             var response = new MarketGoodReadResponseV1
             {
-                CorrelationId = ForwardedRequest.CorrelationId, SystemId = ForwardedRequest.SystemId,
-                MarketId = ForwardedRequest.MarketId, GoodId = ForwardedRequest.GoodId,
+                CorrelationId = ForwardedRequest.CorrelationId,
+                SystemId = ForwardedRequest.SystemId,
+                MarketId = ForwardedRequest.MarketId,
+                GoodId = ForwardedRequest.GoodId,
                 Status = MarketGoodReadStatusV1.Found,
                 SystemRevision = ForwardedRequest.ExpectedSystemRevision ?? 7,
-                MarketRevision = good.MarketRevision, Good = good
+                MarketRevision = good.MarketRevision,
+                Good = good
             };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
         }

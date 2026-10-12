@@ -67,8 +67,11 @@ public sealed class CharacterLeaseAcquisitionServiceTests
         var service = new CharacterLeaseReleaseService(store, new FixedTimeProvider(Now));
         var request = new CharacterLeaseReleaseRequestV1
         {
-            CorrelationId = Guid.NewGuid(), CharacterId = 73, SessionId = Guid.NewGuid(),
-            LeaseToken = LeaseToken, LeaseVersion = 4
+            CorrelationId = Guid.NewGuid(),
+            CharacterId = 73,
+            SessionId = Guid.NewGuid(),
+            LeaseToken = LeaseToken,
+            LeaseVersion = 4
         };
 
         var result = await service.ReleaseAsync(request, "liberty-01");

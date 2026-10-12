@@ -116,8 +116,11 @@ public sealed class MySqlCharacterRosterDeletionTests
             var bootstrapPayload = "Pilot SaveGame"u8.ToArray();
             var bootstrap = new CharacterBootstrapRequestV1
             {
-                CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session,
-                CharacterId = 76, Payload = bootstrapPayload
+                CorrelationId = Guid.NewGuid(),
+                AccountId = account,
+                SessionId = session,
+                CharacterId = 76,
+                Payload = bootstrapPayload
             };
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored,
                 (await snapshots.BootstrapAsync(bootstrap, now)).Status);
@@ -125,7 +128,10 @@ public sealed class MySqlCharacterRosterDeletionTests
                 (await snapshots.BootstrapAsync(bootstrap with { Payload = [9, 9] }, now)).Status);
             var previewRequest = new CharacterSnapshotPreviewRequestV1
             {
-                CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session, CharacterId = 76
+                CorrelationId = Guid.NewGuid(),
+                AccountId = account,
+                SessionId = session,
+                CharacterId = 76
             };
             var preview = await snapshots.ReadPreviewAsync(previewRequest, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, preview.Status);
@@ -139,7 +145,10 @@ public sealed class MySqlCharacterRosterDeletionTests
             var bootstrappedRead = await snapshots.ReadAsync("target-01", SHA256.HashData(leaseToken),
                 new CharacterSaveSnapshotReadRequestV1
                 {
-                    CorrelationId = Guid.NewGuid(), CharacterId = 76, LeaseToken = Encode(leaseToken), LeaseVersion = 1
+                    CorrelationId = Guid.NewGuid(),
+                    CharacterId = 76,
+                    LeaseToken = Encode(leaseToken),
+                    LeaseVersion = 1
                 }, now);
             Assert.Equal(CharacterSaveSnapshotStoreStatus.Stored, bootstrappedRead.Status);
             Assert.Equal(bootstrapPayload, bootstrappedRead.Snapshot!.Payload);
@@ -158,7 +167,10 @@ public sealed class MySqlCharacterRosterDeletionTests
 
     private static CharacterDeletionRequestV1 Delete(Guid account, Guid session, long characterId) => new()
     {
-        CorrelationId = Guid.NewGuid(), AccountId = account, SessionId = session, CharacterId = characterId
+        CorrelationId = Guid.NewGuid(),
+        AccountId = account,
+        SessionId = session,
+        CharacterId = characterId
     };
 
     private static string Encode(byte[] token) => Convert.ToBase64String(token).TrimEnd('=').Replace('+', '-').Replace('/', '_');
